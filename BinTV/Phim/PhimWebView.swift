@@ -906,7 +906,11 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
               let json = String(data: data, encoding: .utf8) else { return }
         let js = "try { if (typeof window.\(name) === 'function') { window.\(name)(\(json)); } } catch (e) {}"
-        let run = { [weak self] in
+        // [CI 2026-09-13] Ghi rõ loại () -> Void: thân closure trả Void?
+        // (optional-chaining) -> suy ra () -> Void? -> async(execute:) không
+        // khớp overload nào (error: cannot convert '() -> Void?' to
+        // 'DispatchWorkItem'). Có annotation, Void? tự coerce về Void.
+        let run: () -> Void = { [weak self] in
             self?.webView.evaluateJavaScript(js, completionHandler: nil)
         }
         if Thread.isMainThread { run() } else { DispatchQueue.main.async(execute: run) }
@@ -934,7 +938,7 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
                               (url.isEmpty && proxyURL.isEmpty)
                                 ? "payload không có url → dừng player native"
                                 : "action=\(action)")
-            let stop = { [weak self] in self?.nativePlayer.stop() }
+            let stop: () -> Void = { [weak self] in self?.nativePlayer.stop() }
             if Thread.isMainThread { stop() } else { DispatchQueue.main.async(execute: stop) }
             return
         }
