@@ -634,6 +634,9 @@ jobs:
               echo "::error::Khong co .xcarchive o '$ARCHIVE_PATH' (xcodebuild exit $RC)."
               echo "===== cac dong 'error:' trong xbuild.log ====="
               grep -n -E "error:|fatal error|cannot find|No such file|Build input file" "$XLOG" | tail -n 60 || true
+              # [2026-09-13] Xuat error ra ANNOTATION (::error::) de doc duoc
+              # qua check-runs/annotations API khi log artifact khong tai duoc.
+              grep -E "error:|fatal error|cannot find|No such file|Build input file" "$XLOG" 2>/dev/null | tail -n 15 | while IFS= read -r ln; do echo "::error::[xbuild.log] $ln"; done || true
               echo "===== 40 dong cuoi ====="
               tail -n 40 "$XLOG"
               exit 1
@@ -654,6 +657,9 @@ jobs:
             echo "::error::Khong tim thay .app duoc tao ra (xcodebuild exit $RC)."
             echo "===== cac dong 'error:' trong xbuild.log ====="
             grep -n -E "error:|fatal error|cannot find|No such file|Build input file" "$XLOG" | tail -n 60 || true
+            # [2026-09-13] Xuat error ra ANNOTATION (::error::) — xem ghi chu o
+            # canh 'Khong co .xcarchive' tren.
+            grep -E "error:|fatal error|cannot find|No such file|Build input file" "$XLOG" 2>/dev/null | tail -n 15 | while IFS= read -r ln; do echo "::error::[xbuild.log] $ln"; done || true
             echo "===== 40 dong cuoi ====="
             tail -n 40 "$XLOG"
             exit 1
@@ -661,6 +667,7 @@ jobs:
 
           if [ "$RC" -ne 0 ]; then
             echo "::error::xcodebuild ket thuc voi exit code $RC - build THAT BAI."
+            grep -E "error:|fatal error|cannot find|No such file|Build input file" "$XLOG" 2>/dev/null | tail -n 15 | while IFS= read -r ln; do echo "::error::[xbuild.log] $ln"; done || true
             exit "$RC"
           fi
 
@@ -1077,8 +1084,8 @@ jobs:
             echo "|---|---|"
             echo "| Project | \`${{ steps.detect.outputs.project_path }}\` |"
             echo "| Scheme | \`${{ steps.detect.outputs.scheme }}\` |"
-            echo "| Mode | \`${{ inputs.run_mode }}\` |"
-            echo "| Configuration | \`${{ inputs.configuration }}\` |"
+            echo "| Mode | \`${{ inputs.run_mode || 'archive' }}\` |"
+            echo "| Configuration | \`${{ inputs.configuration || 'Release' }}\` |"
             echo "| Runner | \`${{ env.RUNNER }}\` |"
             echo "| Xcode | \`$(xcodebuild -version 2>/dev/null | head -n1 || echo '?')\` |"
             echo "| Bundle ID | \`${{ steps.preflight.outputs.bundle_id }}\` |"
