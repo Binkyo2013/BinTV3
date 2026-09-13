@@ -495,7 +495,10 @@ jobs:
       # (3) CHON VERSION XCODE qua DEVELOPER_DIR - khong sudo
       # ------------------------------------------------------------------------
       - name: Select Xcode
-        if: ${{ inputs.xcode_version != 'default' }}
+        # [2026-09-13] push/tag event KHONG co inputs ('' != 'default' = true)
+        # -> step chay voi V='' va that bai (xay ra o run tag v2.5.1-b231).
+        # Co (|| 'default') de push/tag bo qua step nay = dung Xcode mac dinh.
+        if: ${{ (inputs.xcode_version || 'default') != 'default' }}
         shell: bash
         run: |
           XLOG="$GITHUB_WORKSPACE/$BUILD_DIR/xbuild.log"
@@ -574,10 +577,14 @@ jobs:
           ARCHIVE_PATH="$OUT_DIR/$SCHEME.xcarchive"
           rm -rf "$ARCHIVE_PATH"
 
+          # [2026-09-13] push/tag event khong co inputs -> dung mac dinh giup
+          # voi workflow_dispatch (Release / archive) de 2 luu kieu giong nhau.
+          CONF="${{ inputs.configuration || 'Release' }}"
+
           ARGS=(
             "${{ steps.detect.outputs.project_flag }}" "${{ steps.detect.outputs.project_path }}"
             -scheme "$SCHEME"
-            -configuration "${{ inputs.configuration }}"
+            -configuration "$CONF"
             -derivedDataPath "$DERIVED"
             CODE_SIGNING_ALLOWED=NO
             CODE_SIGNING_REQUIRED=NO
@@ -601,7 +608,7 @@ jobs:
             ARGS+=( "ARCHS=$ARCHS_IN" "VALID_ARCHS=$ARCHS_IN" )
           fi
 
-          MODE="${{ inputs.run_mode }}"
+          MODE="${{ inputs.run_mode || 'archive' }}"
           if [ "$MODE" = "archive" ]; then
             ARGS+=( -destination generic/platform=iOS -archivePath "$ARCHIVE_PATH" archive )
           else
