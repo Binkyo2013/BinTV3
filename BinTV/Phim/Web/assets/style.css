@@ -1,0 +1,543 @@
+/* =====================================================
+   PHIM - STYLE (Node.js version)
+   Chỉ giữ các class liên quan đến module Phim
+   ===================================================== */
+
+* { box-sizing: border-box; }
+
+html, body {
+    width: 100%; height: 100%; margin: 0; padding: 0;
+    overflow: hidden; font-family: Arial, sans-serif; color: #fff;
+}
+
+body {
+    position: relative; width: 100%; height: 100%;
+    background-color: #000;
+}
+
+#bg {
+    position: fixed; left: 0; top: 0; width: 100%; height: 100%;
+    z-index: 0; pointer-events: none; overflow: hidden;
+    background: #101014 url('bg1.jpg') no-repeat center center;
+    background-size: cover;
+}
+
+.bg-layer {
+    position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+    background-repeat: no-repeat; background-position: center center;
+    background-size: cover; opacity: 0;
+    transition: opacity 1.5s ease-in-out;
+}
+
+.bg-layer.active {
+    opacity: 1;
+}
+
+/* =====================================================
+   EXIT MODAL - QUÉT | THOÁT | HỦY
+   (Copy từ BinTV.apk style.css gốc)
+   ===================================================== */
+#bintv-exit-modal {
+    position: fixed;
+    left: 0;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    /* [Phim LAN14i 2026-09] z-index 400000 (cao hon player 360000, filter 356500,
+       search 356000, browser 350000) de dialog thoat LUON len tren cung, bat
+       ke user dang o man hinh nao (xem phim, search, filter, browser). */
+    z-index: 400000;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    font-family: Arial, sans-serif;
+    color: #fff;
+}
+
+#bintv-exit-modal.show {
+    display: flex;
+}
+
+#bintv-exit-modal .bintv-exit-backdrop {
+    position: absolute;
+    left: 0;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0,0,0,.68);
+}
+
+#bintv-exit-modal .bintv-exit-dialog {
+    position: relative;
+    z-index: 1;
+    width: 820px;
+    max-width: 88%;
+    padding: 42px 46px 38px;
+    border-radius: 24px;
+    background: rgba(20,20,20,.98);
+    border: 2px solid rgba(255,255,255,.28);
+    box-shadow: 0 24px 80px rgba(0,0,0,.75);
+    text-align: center;
+}
+
+#bintv-exit-modal .bintv-exit-title {
+    margin: 0 0 16px;
+    color: #fff;
+    font-size: 42px;
+    font-weight: 700;
+    line-height: 1.15;
+}
+
+#bintv-exit-modal .bintv-exit-message {
+    margin: 0 auto 34px;
+    max-width: 700px;
+    color: rgba(255,255,255,.84);
+    font-size: 24px;
+    font-weight: 400;
+    line-height: 1.4;
+}
+
+#bintv-exit-modal .bintv-exit-actions {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+}
+
+#bintv-exit-modal .bintv-exit-button {
+    flex: 0 0 205px;
+    width: 205px;
+    height: 72px;
+    padding: 0 18px;
+    border: 2px solid rgba(255,255,255,.28);
+    border-radius: 14px;
+    outline: none;
+    background: rgba(255,255,255,.10);
+    color: #fff;
+    font-family: Arial, sans-serif;
+    font-size: 27px;
+    font-weight: 700;
+    text-align: center;
+    cursor: pointer;
+    transition: transform .15s ease, background .15s ease,
+                border-color .15s ease, box-shadow .15s ease;
+}
+
+#bintv-exit-modal .bintv-exit-button.focus,
+#bintv-exit-modal .bintv-exit-button:focus {
+    transform: scale(1.08);
+    background: #fff;
+    border-color: #fff;
+    color: #111;
+    box-shadow: 0 0 0 4px rgba(255,255,255,.22),
+                0 12px 32px rgba(0,0,0,.55);
+}
+
+#bintv-exit-modal .bintv-exit-button:hover {
+    background: rgba(255,255,255,.18);
+}
+
+#bintv-exit-modal .bintv-exit-button:active {
+    transform: scale(0.98);
+}
+
+@media screen and (max-width: 900px) {
+    #bintv-exit-modal .bintv-exit-dialog {
+        width: 92%;
+        padding: 30px 22px 28px;
+    }
+
+    #bintv-exit-modal .bintv-exit-title {
+        font-size: 32px;
+    }
+
+    #bintv-exit-modal .bintv-exit-message {
+        margin-bottom: 24px;
+        font-size: 19px;
+    }
+
+    #bintv-exit-modal .bintv-exit-actions {
+        gap: 10px;
+    }
+
+    #bintv-exit-modal .bintv-exit-button {
+        flex-basis: 29%;
+        width: 29%;
+        min-width: 0;
+        height: 60px;
+        font-size: 21px;
+    }
+}
+
+/* =====================================================
+   BUILTIN MOVIE BROWSER / PLAYER
+   ===================================================== */
+#bintv-movie-browser {
+    position: fixed; left: 0; top: 0; right: 0; bottom: 0;
+    z-index: 350000; display: none; color: #fff;
+    background: #101014; font-family: Arial, sans-serif;
+}
+#bintv-movie-browser.show { display: block; }
+#bintv-movie-browser.player-active { visibility: hidden; }
+
+.movie-browser-header {
+    height: 118px; padding: 24px 38px;
+    display: flex; align-items: center; gap: 28px;
+    background: #17171d; border-bottom: 1px solid rgba(255,255,255,.16);
+}
+.movie-browser-title { font-size: 48px; font-weight: 700; color: #ff19b9; }
+.movie-browser-catalog-title {
+    flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+    font-size: 31px; font-weight: 700;
+}
+.movie-browser-body { height: calc(100% - 118px); display: flex; }
+.movie-catalogs {
+    flex: 0 0 300px; width: 300px; height: 100%; overflow-y: auto;
+    padding: 22px 14px; background: #15151a; border-right: 1px solid rgba(255,255,255,.14);
+}
+.movie-catalog-row {
+    min-height: 58px; margin: 5px 0; padding: 15px 18px;
+    border: 2px solid transparent; border-radius: 11px;
+    color: rgba(255,255,255,.78); font-size: 21px; line-height: 1.2;
+}
+.movie-catalog-row.selected { color: #fff; background: rgba(255,25,185,.13); }
+.movie-catalog-row.focus {
+    color: #111; background: #fff; border-color: #fff;
+    box-shadow: 0 0 0 4px rgba(255,255,255,.18);
+}
+.movie-content { position: relative; flex: 1; height: 100%; overflow: hidden; padding: 54px 24px 24px; }
+.movie-status {
+    position: absolute; left: 28px; top: 14px; right: 28px;
+    min-height: 28px; color: rgba(255,255,255,.72); font-size: 19px;
+}
+.movie-status.error { color: #ff8b8b; }
+.movie-grid {
+    height: 100%; overflow-y: auto; padding: 8px 12px 40px;
+    display: flex; flex-direction: row; flex-wrap: wrap;
+    align-content: flex-start;
+}
+.movie-card {
+    flex: 0 0 calc(20% - 18px); min-width: 0; margin: 0 9px 24px;
+    padding: 8px; border: 3px solid transparent;
+    border-radius: 14px; background: rgba(255,255,255,.055);
+    transition: transform .08s ease-out, border-color .08s linear, background .08s linear;
+}
+.movie-card.focus {
+    z-index: 2; transform: scale(1.06); border-color: #fff;
+    background: rgba(255,255,255,.18); box-shadow: 0 12px 35px rgba(0,0,0,.6);
+}
+.movie-card-poster {
+    display: block; width: 100%; height: 300px; object-fit: cover;
+    border-radius: 9px; background: #292931;
+}
+.movie-grid.movie-grid-tv .movie-card-poster {
+    height: 165px; aspect-ratio: 16 / 9; object-fit: contain;
+    background: #111118;
+}
+.movie-card-name {
+    height: 46px; margin-top: 9px; overflow: hidden;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+    white-space: normal; line-height: 1.2;
+    color: #fff; font-size: 19px; font-weight: 700;
+}
+.movie-card-meta {
+    height: 22px; margin-top: 3px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+    color: rgba(255,255,255,.60); font-size: 15px;
+}
+.movie-card-skeleton { pointer-events: none; }
+.movie-skeleton-block {
+    background: rgba(255,255,255,.08);
+}
+.movie-skeleton-name { width: 82%; height: 20px; margin-top: 12px; border-radius: 6px; }
+.movie-skeleton-meta { width: 55%; height: 15px; margin-top: 8px; border-radius: 5px; }
+
+.movie-episodes {
+    position: fixed; left: 0; top: 0; right: 0; bottom: 0;
+    z-index: 355000; display: none; align-items: center; justify-content: center;
+    background: rgba(0,0,0,.76);
+}
+.movie-episodes.show { display: flex; }
+.movie-episodes-dialog {
+    width: 1120px; max-height: 820px; padding: 32px;
+    border: 2px solid rgba(255,255,255,.25); border-radius: 20px;
+    background: #191920; box-shadow: 0 25px 90px rgba(0,0,0,.8);
+}
+.movie-episodes-title { margin-bottom: 24px; font-size: 34px; font-weight: 700; }
+.movie-episodes-list {
+    max-height: 620px; overflow-y: auto;
+    display: flex; flex-direction: row; flex-wrap: wrap;
+}
+.movie-episode-button {
+    flex: 0 0 calc(20% - 14px); min-height: 64px; margin: 7px;
+    padding: 18px 12px; border: 2px solid rgba(255,255,255,.18);
+    border-radius: 10px; background: rgba(255,255,255,.08);
+    color: #fff; font-size: 20px; font-weight: 700; text-align: center;
+}
+.movie-episode-button.focus {
+    border-color: #fff; background: #fff; color: #111;
+    box-shadow: 0 0 0 4px rgba(255,255,255,.18);
+}
+.movie-episodes-help { margin-top: 22px; color: rgba(255,255,255,.65); font-size: 18px; text-align: center; }
+
+#bintv-movie-player {
+    position: fixed; left: 0; top: 0; right: 0; bottom: 0;
+    z-index: 360000; display: none; overflow: hidden; background: #000;
+}
+#bintv-movie-player.show { display: block; }
+#bintv-movie-avplayer,
+#bintv-movie-html5-player {
+    position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+    background: #000; object-fit: contain;
+}
+.movie-player-overlay {
+    position: absolute; left: 0; top: 0; right: 0; z-index: 2;
+    padding: 28px 42px 60px;
+    background: linear-gradient(to bottom, rgba(0,0,0,.86), rgba(0,0,0,0));
+    pointer-events: none;
+}
+.movie-player-title { max-width: 1450px; font-size: 32px; font-weight: 700; }
+.movie-player-status { margin-top: 8px; color: rgba(255,255,255,.78); font-size: 20px; }
+
+.movie-seek-timeline {
+    position: absolute; left: 90px; right: 90px; bottom: 46px; z-index: 12;
+    padding: 18px 24px 20px; border-radius: 16px;
+    background: rgba(8,8,12,.86); box-shadow: 0 12px 38px rgba(0,0,0,.62);
+    opacity: 0; transform: translateY(22px); visibility: hidden;
+    transition: opacity .18s ease, transform .18s ease, visibility 0s linear .18s;
+    pointer-events: none;
+}
+.movie-seek-timeline.show {
+    opacity: 1; transform: translateY(0); visibility: visible;
+    transition-delay: 0s;
+}
+.movie-seek-timeline-times {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 12px; color: #fff; font-size: 20px; font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+#bintv-movie-seek-target { color: #ff39c5; }
+.movie-seek-timeline-track {
+    position: relative; width: 100%; height: 12px; border-radius: 999px;
+    background: rgba(255,255,255,.24);
+}
+.movie-seek-timeline-progress {
+    position: absolute; left: 0; top: 0; bottom: 0; width: 0;
+    border-radius: 999px; background: linear-gradient(90deg, #ff19b9, #ff70d5);
+    transition: width .10s linear;
+}
+.movie-seek-timeline-thumb {
+    position: absolute; left: 0; top: 50%; width: 26px; height: 26px;
+    margin-left: -13px; margin-top: -13px; border-radius: 50%;
+    background: #fff; box-shadow: 0 0 0 5px rgba(255,25,185,.46), 0 4px 14px rgba(0,0,0,.55);
+    transition: left .10s linear;
+}
+
+/* Vietsub controls */
+.movie-subtitle-status {
+    min-height: 28px; margin: -10px 0 18px; color: rgba(255,255,255,.72);
+    font-size: 18px; text-align: center;
+}
+.movie-subtitle-text {
+    position: absolute; left: 8%; right: 8%; bottom: 92px; z-index: 5;
+    color: #fff; font-family: Arial, sans-serif; font-size: 38px;
+    font-weight: 700; line-height: 1.28; text-align: center;
+    white-space: pre-line; text-shadow: 0 2px 4px #000, 0 0 8px #000, 2px 2px 2px #000;
+    pointer-events: none;
+}
+.movie-subtitle-menu {
+    position: absolute; left: 0; top: 0; right: 0; bottom: 0; z-index: 20;
+    display: none; align-items: center; justify-content: center;
+    background: rgba(0,0,0,.68);
+}
+.movie-subtitle-menu.show { display: flex; }
+.movie-subtitle-dialog {
+    width: 680px; max-height: 760px; padding: 30px;
+    border: 2px solid rgba(255,255,255,.26); border-radius: 18px;
+    background: #191920; box-shadow: 0 24px 80px rgba(0,0,0,.8);
+}
+.movie-subtitle-title {
+    margin-bottom: 22px; color: #fff; font-size: 34px; font-weight: 700;
+    text-align: center;
+}
+.movie-subtitle-list { max-height: 620px; overflow-y: auto; }
+.movie-subtitle-option {
+    min-height: 58px; margin: 8px 0; padding: 16px 20px;
+    border: 2px solid rgba(255,255,255,.18); border-radius: 10px;
+    background: rgba(255,255,255,.07); color: #fff;
+    font-size: 21px; font-weight: 700; text-align: center;
+}
+.movie-subtitle-option.focus {
+    border-color: #fff; background: #fff; color: #111;
+    box-shadow: 0 0 0 4px rgba(255,255,255,.18);
+}
+
+/* Movie source grouping and actual-data filters */
+.movie-filter-bar {
+    display: flex; flex-direction: row; align-items: center; gap: 10px;
+}
+.movie-filter-button {
+    min-width: 128px; height: 50px; padding: 0 16px;
+    border: 2px solid rgba(255,255,255,.22); border-radius: 10px;
+    outline: none; background: rgba(255,255,255,.07); color: rgba(255,255,255,.78);
+    font-family: Arial, sans-serif; font-size: 18px; font-weight: 700;
+}
+.movie-filter-button.active {
+    border-color: rgba(255,25,185,.9); background: rgba(255,25,185,.20); color: #fff;
+}
+.movie-filter-button.focus {
+    border-color: #fff; background: #fff; color: #111;
+    box-shadow: 0 0 0 4px rgba(255,255,255,.18);
+}
+.movie-search-button {
+    flex: 0 0 auto; min-width: 158px; height: 50px; padding: 0 16px;
+    display: flex; align-items: center; justify-content: center; gap: 9px;
+    border: 2px solid rgba(255,255,255,.22); border-radius: 10px;
+    outline: none; background: rgba(255,25,185,.14); color: #fff;
+    font-family: Arial, sans-serif; font-size: 18px; font-weight: 700;
+}
+.movie-search-button-mic { font-size: 23px; line-height: 1; }
+.movie-search-button.focus {
+    border-color: #fff; background: #fff; color: #111;
+    box-shadow: 0 0 0 4px rgba(255,255,255,.18);
+}
+
+.movie-filter-menu {
+    position: fixed; left: 0; top: 0; right: 0; bottom: 0; z-index: 356500;
+    display: none; align-items: center; justify-content: center;
+    background: rgba(0,0,0,.78);
+}
+.movie-filter-menu.show { display: flex; }
+.movie-filter-menu-dialog {
+    width: 680px; max-height: 880px; padding: 32px;
+    border: 2px solid rgba(255,255,255,.25); border-radius: 20px;
+    background: #191920; box-shadow: 0 24px 80px rgba(0,0,0,.8);
+}
+.movie-filter-menu-title { margin-bottom: 22px; font-size: 34px; font-weight: 700; text-align: center; }
+.movie-filter-menu-list { display: flex; flex-direction: column; gap: 10px; }
+.movie-filter-menu-option {
+    min-height: 62px; padding: 17px 22px;
+    border: 2px solid rgba(255,255,255,.18); border-radius: 11px;
+    background: rgba(255,255,255,.07); color: #fff;
+    font-size: 21px; font-weight: 700;
+}
+.movie-filter-menu-option.active {
+    border-color: #ff39c5; background: rgba(255,25,185,.20);
+}
+.movie-filter-menu-option.focus {
+    border-color: #fff; background: #fff; color: #111;
+    box-shadow: 0 0 0 4px rgba(255,255,255,.18);
+}
+.movie-filter-menu-option.active.focus {
+    box-shadow: 0 0 0 4px rgba(255,25,185,.55);
+}
+.movie-filter-menu-help { margin-top: 20px; color: rgba(255,255,255,.65); font-size: 18px; text-align: center; }
+
+.movie-search-overlay {
+    position: fixed; left: 0; top: 0; right: 0; bottom: 0; z-index: 356000;
+    display: none; align-items: center; justify-content: center;
+    background: rgba(0,0,0,.78);
+}
+.movie-search-overlay.show { display: flex; }
+.movie-search-dialog {
+    width: 900px; padding: 38px 42px 32px;
+    border: 2px solid rgba(255,255,255,.28); border-radius: 22px;
+    background: #191920; box-shadow: 0 26px 95px rgba(0,0,0,.86);
+}
+.movie-search-title {
+    color: #fff; font-size: 38px; font-weight: 700; text-align: center;
+}
+.movie-search-status {
+    min-height: 29px; margin: 14px 0 24px;
+    color: rgba(255,255,255,.72); font-size: 19px; text-align: center;
+}
+.movie-search-status.error { color: #ff9999; }
+.movie-search-input {
+    display: block; box-sizing: border-box; width: 100%; height: 68px;
+    padding: 0 20px; border: 3px solid rgba(255,255,255,.25); border-radius: 12px;
+    outline: none; background: rgba(255,255,255,.09); color: #fff;
+    font-family: Arial, sans-serif; font-size: 25px; font-weight: 600;
+}
+.movie-search-input::placeholder { color: rgba(255,255,255,.45); }
+.movie-search-input.focus,
+.movie-search-input:focus {
+    border-color: #fff; background: rgba(255,255,255,.16);
+    box-shadow: 0 0 0 5px rgba(255,255,255,.16);
+}
+.movie-search-actions {
+    display: flex; flex-direction: row; justify-content: center; gap: 18px;
+    margin-top: 24px;
+}
+.movie-search-action {
+    min-width: 220px; height: 66px; padding: 0 18px;
+    border: 3px solid rgba(255,255,255,.22); border-radius: 12px;
+    outline: none; background: rgba(255,255,255,.08); color: #fff;
+    font-family: Arial, sans-serif; font-size: 22px; font-weight: 700;
+}
+.movie-search-action.focus {
+    border-color: #fff; background: #fff; color: #111;
+    box-shadow: 0 0 0 5px rgba(255,255,255,.16);
+}
+.movie-search-voice { background: rgba(255,25,185,.18); }
+.movie-search-keyboard { background: rgba(70,145,255,.16); }
+.movie-search-mic-icon,
+.movie-search-keyboard-icon { margin-right: 6px; font-size: 27px; vertical-align: -2px; }
+.movie-search-help {
+    margin-top: 25px; color: rgba(255,255,255,.57); font-size: 18px; text-align: center;
+}
+
+.movie-catalog-group-title {
+    margin: 18px 8px 8px; padding: 0 8px;
+    color: #ff72d6; font-size: 20px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 1px;
+}
+.movie-catalog-group-title:first-child { margin-top: 2px; }
+
+/* Episode picker inside fullscreen player */
+.movie-player-episodes {
+    position: absolute; left: 0; top: 0; right: 0; bottom: 0; z-index: 22;
+    display: none; align-items: flex-end; justify-content: center;
+    padding: 0 4vw 7vh; background: rgba(0,0,0,.36);
+}
+.movie-player-episodes.show { display: flex; }
+.movie-player-episodes-dialog {
+    width: 92vw; max-height: 300px; padding: 24px 26px;
+    border: 2px solid rgba(255,255,255,.26); border-radius: 18px;
+    background: rgba(20,20,25,.97); box-shadow: 0 20px 70px rgba(0,0,0,.8);
+}
+.movie-player-episodes-title {
+    margin-bottom: 18px; color: #fff; font-size: 28px; font-weight: 700;
+}
+.movie-player-episodes-list {
+    display: flex; flex-direction: row; flex-wrap: nowrap; gap: 12px;
+    overflow-x: auto; overflow-y: hidden; padding: 7px 5px 12px;
+}
+.movie-player-episode-option {
+    flex: 0 0 150px; min-width: 150px; height: 64px; padding: 18px 12px;
+    border: 2px solid rgba(255,255,255,.20); border-radius: 10px;
+    background: rgba(255,255,255,.08); color: #fff;
+    font-size: 20px; font-weight: 700; text-align: center;
+    overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+.movie-player-episode-option.current {
+    border-color: #ff39c5; background: rgba(255,25,185,.22);
+}
+.movie-player-episode-option.focus {
+    border-color: #fff; background: #fff; color: #111;
+    transform: scale(1.06); box-shadow: 0 0 0 4px rgba(255,255,255,.18);
+}
+.movie-player-episode-option.current.focus {
+    box-shadow: 0 0 0 4px rgba(255,25,185,.55);
+}
+
+/* Toast notification */
+#bintv-toast {
+    position: fixed; left: 50%; bottom: 120px; transform: translate(-50%, 20px);
+    z-index: 100000; max-width: 900px; padding: 13px 22px;
+    border-radius: 10px; background: rgba(15,15,15,.94);
+    border: 1px solid rgba(255,255,255,.22); color: #fff;
+    font-size: 19px; text-align: center; opacity: 0;
+    pointer-events: none; transition: opacity .18s ease, transform .18s ease;
+}
+
+#bintv-toast.show { opacity: 1; transform: translate(-50%, 0); }

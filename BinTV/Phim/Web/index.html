@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="vi-VN">
+
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Language" content="vi-VN">
+    <meta name="language" content="Vietnamese">
+    <meta name="viewport" content="width=1920,height=1080">
+    <title>Phim</title>
+    <!-- Cache buster ?v=20260903h cho style.css de dam bao
+         khong dung CSS cu da cache trong browser/Electron. -->
+    <link rel="stylesheet" href="assets/style.css?v=20260903h">
+    <!-- [Phim ANDROID v1.2.1] HUD player: tu an overlay khi phat, nut tam dung,
+         cho phep cham vao timeline de tua. Nap cho CA TV va dien thoai. -->
+    <link rel="stylesheet" href="assets/phim_ui.css?v=20260911a">
+    <!-- [Phim ANDROID 2026-09] Mac dinh giu viewport 1920x1080 giong ban
+         Electron (Android TV: layout 1920 CSS px duoc scale vua khung man hinh,
+         dung thuoc phan cung = ban Windows). Khi MainActivity tai voi
+         ?android=phone (dien thoai cam ung), chuyen sang viewport responsive
+         va nap them phone.css cho kich thuoc cham ung hop ly.
+         LUU Y: phone.css phai nam SAU style.css trong <head> de override
+         cascade (cung do dai cu the, stylesheet sau thang). -->
+    <script>
+    (function () {
+        try {
+            var search = window.location.search;
+            if (/[?&]android=phone(?:&|$)/.test(search)) {
+                var viewportMeta = document.querySelector('meta[name="viewport"]');
+                if (viewportMeta) viewportMeta.setAttribute("content", "width=device-width, initial-scale=1, viewport-fit=cover");
+                var phoneCss = document.createElement("link");
+                phoneCss.rel = "stylesheet";
+                phoneCss.href = "assets/phone.css?v=20260910a";
+                document.head.appendChild(phoneCss);
+                // [BinTV iOS 2026-09] ios=landscape: app BinTV chạy chế độ
+                // TV (màn hình LUÔN ngang) -> nạp THÊM landscape.css SAU
+                // phone.css (override cascade) cho bố cục ngang: lưới poster
+                // nhiều cột, header compact, dialog chọn tập 8 cột, padding
+                // env(safe-area-inset-*) cho Dynamic Island.
+                // KHÔNG đổi tham số android=phone (giữ toàn bộ logic phone).
+                if (/[?&]ios=landscape(?:&|$)/.test(search)) {
+                    var landCss = document.createElement("link");
+                    landCss.rel = "stylesheet";
+                    landCss.href = "assets/landscape.css?v=20260913c";
+                    document.head.appendChild(landCss);
+                }
+            }
+        } catch (e) {}
+    })();
+    </script>
+    <script>
+        // Kich hoat che do standalone: app.js se tu mo Phim thay vi hien thi launcher BinTV
+        window.__BINTV_PHIM_STANDALONE__ = true;
+    </script>
+</head>
+
+<body lang="vi-VN">
+
+    <!-- Browser UI cho module Phim - render ngay khi tải trang -->
+    <div id="bintv-movie-browser" class="show">
+        <div class="movie-browser-header">
+            <div class="movie-browser-title">Phim</div>
+            <div id="bintv-movie-filters" class="movie-filter-bar">
+                <button type="button" class="movie-filter-button" data-movie-filter="all">Tất cả</button>
+                <button id="bintv-movie-search-button" type="button" class="movie-search-button"
+                    aria-label="Tìm kiếm phim">
+                    <span class="movie-search-button-mic">🔍</span>
+                    <span>Tìm kiếm</span>
+                </button>
+                <button id="bintv-movie-filter-menu-button" type="button" class="movie-filter-button"
+                    data-movie-filter="filter-menu">Lọc Phim</button>
+            </div>
+            <div id="bintv-movie-catalog-title" class="movie-browser-catalog-title"></div>
+        </div>
+        <div class="movie-browser-body">
+            <div id="bintv-movie-catalogs" class="movie-catalogs"></div>
+            <div class="movie-content">
+                <div id="bintv-movie-status" class="movie-status">Đang tải...</div>
+                <div id="bintv-movie-grid" class="movie-grid"></div>
+            </div>
+        </div>
+
+        <!-- Search overlay -->
+        <div id="bintv-movie-search" class="movie-search-overlay">
+            <div class="movie-search-dialog">
+                <div class="movie-search-title">Tìm kiếm phim</div>
+                <div id="bintv-movie-search-status" class="movie-search-status">Nhập tên phim bằng bàn phím</div>
+                <input id="bintv-movie-search-input" class="movie-search-input" type="text" inputmode="text"
+                    lang="vi-VN" xml:lang="vi-VN" enterkeyhint="search" autocomplete="off" autocapitalize="none"
+                    spellcheck="true" placeholder="Nhập tên phim..."
+                    aria-label="Tên phim cần tìm bằng tiếng Việt">
+                <div class="movie-search-actions">
+                    <button id="bintv-movie-search-keyboard" type="button"
+                        class="movie-search-action movie-search-keyboard" data-search-index="1">
+                        <span class="movie-search-keyboard-icon">⌨</span> Bàn Phím
+                    </button>
+                    <button id="bintv-movie-search-submit" type="button" class="movie-search-action"
+                        data-search-index="2">Tìm kiếm</button>
+                </div>
+                <div class="movie-search-help">←/→: Chọn · OK: Xác nhận · Back: Đóng</div>
+            </div>
+        </div>
+
+        <!-- Filter menu -->
+        <div id="bintv-movie-filter-menu" class="movie-filter-menu">
+            <div class="movie-filter-menu-dialog">
+                <div class="movie-filter-menu-title">Lọc Phim</div>
+                <div id="bintv-movie-filter-menu-list" class="movie-filter-menu-list"></div>
+                <div class="movie-filter-menu-help">↑/↓: Chọn · OK: Áp dụng · Back: Đóng</div>
+            </div>
+        </div>
+
+        <!-- Episodes list -->
+        <div id="bintv-movie-episodes" class="movie-episodes">
+            <div class="movie-episodes-dialog">
+                <div id="bintv-movie-episodes-title" class="movie-episodes-title">Chọn tập</div>
+                <div id="bintv-movie-episodes-list" class="movie-episodes-list"></div>
+                <div class="movie-episodes-help">←/→/↑/↓: Chọn tập · OK: Phát · Back: Quay lại</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Player overlay -->
+    <div id="bintv-movie-player">
+        <!-- [BinTV iOS 2026-09] playsinline/webkit-playsinline: BẮT BUỘC cho
+             iOS WebKit — thẻ <video> KHÔNG có playsinline trên iOS sẽ phát ở
+             chế độ FULLSCREEN (chuyển fullscreen yêu cầu user-activation;
+             play() của app.js gọi sau chuỗi resolve URL bất đồng bộ →
+             activation hết hạn → video KHÔNG phát, play() reject
+             NotAllowedError). Android WebView không có khái niệm này nên
+             bản Android chạy tốt — thuộc tính này bị Android bỏ qua. -->
+        <video id="bintv-movie-html5-player" playsinline webkit-playsinline></video>
+        <div id="bintv-movie-subtitle-text" class="movie-subtitle-text"></div>
+        <div class="movie-player-overlay">
+            <div id="bintv-movie-player-title" class="movie-player-title"></div>
+            <div id="bintv-movie-player-status" class="movie-player-status">Đang chuẩn bị phát…</div>
+        </div>
+        <div id="bintv-movie-seek-timeline" class="movie-seek-timeline" aria-hidden="true">
+            <div class="movie-seek-timeline-times">
+                <span id="bintv-movie-seek-current">00:00</span>
+                <span id="bintv-movie-seek-target">00:00</span>
+                <span id="bintv-movie-seek-duration">00:00</span>
+            </div>
+            <div class="movie-seek-timeline-track">
+                <div id="bintv-movie-seek-progress" class="movie-seek-timeline-progress"></div>
+                <div id="bintv-movie-seek-thumb" class="movie-seek-timeline-thumb"></div>
+            </div>
+        </div>
+        <div id="bintv-movie-subtitle-menu" class="movie-subtitle-menu">
+            <div class="movie-subtitle-dialog">
+                <div class="movie-subtitle-title">Vietsub</div>
+                <div id="bintv-movie-subtitle-status" class="movie-subtitle-status">Đang tìm phụ đề…</div>
+                <div id="bintv-movie-subtitle-list" class="movie-subtitle-list"></div>
+            </div>
+        </div>
+        <div id="bintv-movie-player-episodes" class="movie-player-episodes">
+            <div class="movie-player-episodes-dialog">
+                <div class="movie-player-episodes-title">Danh sách tập</div>
+                <div id="bintv-movie-player-episodes-list" class="movie-player-episodes-list"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast notification -->
+    <div id="bintv-toast"></div>
+
+    <!-- [Phim DEBUG 2026-09] Log overlay - AN mac dinh, chi hien khi user
+         bam Ctrl+Shift+D. Capture console.log luon chay de ghi ra file log.
+         Click overlay de mo rong/thu nho. -->
+    <div id="__phim-debug-overlay" style="position:fixed;top:8px;left:8px;max-width:60%;max-height:50vh;background:rgba(0,0,0,0.85);color:#0f0;font:12px/1.4 monospace;padding:8px;border:1px solid #0a0;border-radius:4px;z-index:999999;overflow:auto;display:none;white-space:pre-wrap;word-break:break-all;"></div>
+    <script>
+    (function () {
+        try {
+            var overlay = document.getElementById('__phim-debug-overlay');
+            if (!overlay) return;
+            // AN mac dinh - chi hien khi user bam Ctrl+Shift+D
+            var MAX = 200;
+            var lines = [];
+            var overlayVisible = false;
+            function render() {
+                overlay.textContent = lines.join('\n');
+                overlay.scrollTop = overlay.scrollHeight;
+            }
+            function append(level, args) {
+                try {
+                    var msg = '[' + level + '] ' +
+                        Array.prototype.slice.call(args).map(function (a) {
+                            if (typeof a === 'string') return a;
+                            try { return JSON.stringify(a); } catch (e) { return String(a); }
+                        }).join(' ').substring(0, 500);
+                    lines.push(msg);
+                    if (lines.length > MAX) lines.shift();
+                    if (overlayVisible) render();
+                } catch (e) {}
+            }
+            var origLog = console.log, origWarn = console.warn, origError = console.error;
+            console.log = function () { append('LOG', arguments); try { return origLog.apply(console, arguments); } catch (e) {} };
+            console.warn = function () { append('WARN', arguments); try { return origWarn.apply(console, arguments); } catch (e) {} };
+            console.error = function () { append('ERROR', arguments); try { return origError.apply(console, arguments); } catch (e) {} };
+            window.addEventListener('error', function (e) {
+                append('UNCAUGHT', [e.message, e.filename + ':' + e.lineno]);
+            });
+            window.addEventListener('unhandledrejection', function (e) {
+                append('REJECT', [String(e.reason)]);
+            });
+            // Phim tat Ctrl+Shift+D: an/hien overlay
+            window.addEventListener('keydown', function (e) {
+                if (e.ctrlKey && e.shiftKey && (e.key === 'D' || e.keyCode === 68)) {
+                    e.preventDefault();
+                    overlayVisible = !overlayVisible;
+                    overlay.style.display = overlayVisible ? 'block' : 'none';
+                    if (overlayVisible) render();
+                }
+            });
+            // Click overlay de mo rong
+            overlay.addEventListener('click', function () {
+                overlay.style.maxHeight = overlay.style.maxHeight === '90vh' ? '50vh' : '90vh';
+            });
+        } catch (e) {}
+    })();
+    </script>
+
+    <!-- JavaScript -->
+    <script src="assets/hls.min.js"></script>
+    <script src="assets/tizen_shim.js"></script>
+    <!-- [Phim ANDROID 2026-09] Thay the cho preload.js cua Electron: expose
+         window.__phimDebug (log/warn/error/exit) qua AndroidBridge cua app
+         Android. exit() -> AndroidBridge.exitApp() -> dong ung dung, dung nhu
+         IPC phim-app-exit tren Windows. Chay TRUOC app.js de app.js thay
+         __phimDebug san san (giong contextBridge cua Electron). -->
+    <script src="assets/phim_android.js"></script>
+    <!-- [Phim DEBUG 2026-09] Script debug CHẠY TRƯỚC app.js. Capture mọi
+         console.log, error, click, lỗi uncaught. Luôn luôn chạy, kể cả khi
+         app.js IIFE bị lỗi. Lưu log vào localStorage (key: __phimDebugLog)
+         để có thể dump từ console hoặc gửi qua IPC. -->
+    <script>
+    (function () {
+        try {
+            var MAX = 200;
+            var logs = [];
+            function pushLog(level, args) {
+                try {
+                    var msg = '[' + new Date().toISOString() + '] [' + level + '] ' +
+                        Array.prototype.slice.call(args).map(function (a) {
+                            if (typeof a === 'string') return a;
+                            try { return JSON.stringify(a); } catch (e) { return String(a); }
+                        }).join(' ');
+                    logs.push(msg);
+                    if (logs.length > MAX) logs.shift();
+                    try { localStorage.setItem('__phimDebugLog', logs.join('\n')); } catch (e) {}
+                } catch (e) {}
+            }
+            window.__phimGetDebugLog = function () { return logs.join('\n'); };
+
+            // 1. Capture mọi console.log/error/warn
+            var origLog = console.log, origWarn = console.warn, origError = console.error;
+            console.log = function () { pushLog('LOG', arguments); try { return origLog.apply(console, arguments); } catch (e) {} };
+            console.warn = function () { pushLog('WARN', arguments); try { return origWarn.apply(console, arguments); } catch (e) {} };
+            console.error = function () { pushLog('ERROR', arguments); try { return origError.apply(console, arguments); } catch (e) {} };
+
+            // 2. Capture uncaught errors
+            window.addEventListener('error', function (e) {
+                pushLog(['UNCAUGHT', e.message, e.filename + ':' + e.lineno + ':' + e.colno, e.error && e.error.stack].filter(Boolean));
+            });
+            window.addEventListener('unhandledrejection', function (e) {
+                pushLog('UNHANDLED_REJECTION', [String(e.reason)]);
+            });
+
+            // 3. Capture click trên thẻ phim
+            document.addEventListener('click', function (e) {
+                var t = e.target;
+                while (t && t !== document.body) {
+                    if (t.classList && (t.classList.contains('movie-card') || t.classList.contains('movie-card-poster'))) {
+                        pushLog('CLICK_MOVIE_CARD', [t.getAttribute && t.getAttribute('data-movie-id'), t.getAttribute && t.getAttribute('data-movie-name')]);
+                        break;
+                    }
+                    t = t.parentNode;
+                }
+            }, true);
+
+            // 4. Capture keydown
+            document.addEventListener('keydown', function (e) {
+                if (e.keyCode === 13 || e.key === 'Enter') {
+                    pushLog('KEYDOWN_ENTER', [document.activeElement && document.activeElement.tagName, document.activeElement && document.activeElement.id]);
+                }
+            }, true);
+
+            pushLog('INFO', ['Debug script loaded, app.js will load next']);
+        } catch (e) {}
+    })();
+    </script>
+    <!-- [Phim DEBUG 2026-09] Cache buster ?v=20260903p de dam bao khong dung
+         phien ban cu cache trong Electron. Neu khong thay log moi, hay xoa
+         file phim-debug.log cu, dong app, xoa thu muc, giai nen lai. -->
+    <script src="assets/stremio.js"></script>
+    <script src="assets/app.js?v=20260903p"></script>
+    <!-- [BinTV iOS 2026-09] Fallback phat TRUC TIEP cho iOS WebKit (chi bat
+         khi khong co MSE + native HLS ho tro; tren Android la no-op).
+         Chi can thiem de debug + thuc hien 1 lan retry direct khi proxy
+         fail - khong thay doi flow goc cua app.js. -->
+    <script src="assets/phim_ios_fallback.js?v=20260912a"></script>
+
+    <script>
+    // [Phim DEBUG 2026-09] Sau khi app.js load, ghi log xác nhận
+    (function () {
+        try {
+            var log = window.console && window.console.log;
+            if (log) log('[Phim DEBUG] All scripts loaded');
+            // Đợi 2s rồi kiểm tra __phimStandaloneLaunched
+            setTimeout(function () {
+                if (log) log('[Phim DEBUG] After 2s: __phimStandaloneLaunched=', window.__phimStandaloneLaunched, 'movieBrowserOpen=', document.getElementById('bintv-movie-browser') && document.getElementById('bintv-movie-browser').classList.contains('show'));
+                if (window.__phimGetDebugLog) {
+                    if (log) log('[Phim DEBUG] Full log:\n' + window.__phimGetDebugLog());
+                }
+            }, 2000);
+        } catch (e) {}
+    })();
+    </script>
+
+</body>
+
+</html>

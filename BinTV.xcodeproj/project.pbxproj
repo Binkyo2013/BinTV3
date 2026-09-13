@@ -1,0 +1,394 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		00000000000000000000000000000B01 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000000000000A01 /* App.swift */; };
+		00000000000000000000000000000B03 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000000000000A03 /* ContentView.swift */; };
+		00000000000000000000000000000B05 /* LiveTVView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000000000000A05 /* LiveTVView.swift */; };
+		00000000000000000000000000000B07 /* MovieListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000000000000A07 /* MovieListView.swift */; };
+		00000000000000000000000000000B09 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000000000000A09 /* SettingsView.swift */; };
+		00000000000000000000000000000B0B /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000000000000A0B /* PlayerView.swift */; };
+		00000000000000000000000000000B0D /* Channel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000000000000A0D /* Channel.swift */; };
+		00000000000000000000000000000B0F /* StreamService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000000000000A0F /* StreamService.swift */; };
+		00000000000000000000000000000B11 /* NetworkService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000000000000A11 /* NetworkService.swift */; };
+		00000000000000000000000000000B13 /* AVPlayerManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000000000000A13 /* AVPlayerManager.swift */; };
+		00000000000000000000000000000B15 /* Preferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000000000000A15 /* Preferences.swift */; };
+		00000000000000000000000000000B17 /* VTTLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000000000000A17 /* VTTLoader.swift */; };
+		0000000000000000000000000000B51 /* UIProportions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000000000A51 /* UIProportions.swift */; };
+		0000000000000000000000000000B59 /* GestureOverlayMenuView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000000000A59 /* GestureOverlayMenuView.swift */; };
+		00000000000000000000000000000B21 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000000000000A21 /* Assets.xcassets */; };
+		00000000000000000000000000000B23 /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000000000000A23 /* Main.storyboard */; };
+		00000000000000000000000000000B41 /* PhimLocalServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000000000000A41 /* PhimLocalServer.swift */; };
+		00000000000000000000000000000B43 /* PhimWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000000000000A43 /* PhimWebView.swift */; };
+		00000000000000000000000000000B47 /* Web in Resources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000000000000A47 /* Web */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		00000000000000000000000000000A01 /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
+		00000000000000000000000000000A03 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		00000000000000000000000000000A05 /* LiveTVView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveTVView.swift; sourceTree = "<group>"; };
+		00000000000000000000000000000A07 /* MovieListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovieListView.swift; sourceTree = "<group>"; };
+		00000000000000000000000000000A09 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		00000000000000000000000000000A0B /* PlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerView.swift; sourceTree = "<group>"; };
+		00000000000000000000000000000A0D /* Channel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Channel.swift; sourceTree = "<group>"; };
+		00000000000000000000000000000A0F /* StreamService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamService.swift; sourceTree = "<group>"; };
+		00000000000000000000000000000A11 /* NetworkService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkService.swift; sourceTree = "<group>"; };
+		00000000000000000000000000000A13 /* AVPlayerManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AVPlayerManager.swift; sourceTree = "<group>"; };
+		00000000000000000000000000000A15 /* Preferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Preferences.swift; sourceTree = "<group>"; };
+		00000000000000000000000000000A17 /* VTTLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VTTLoader.swift; sourceTree = "<group>"; };
+		0000000000000000000000000000A51 /* UIProportions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UIProportions.swift; sourceTree = "<group>"; };
+		0000000000000000000000000000A59 /* GestureOverlayMenuView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GestureOverlayMenuView.swift; sourceTree = "<group>"; };
+		00000000000000000000000000000A19 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		00000000000000000000000000000A21 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		00000000000000000000000000000A23 /* Main.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = Main.storyboard; sourceTree = "<group>"; };
+		00000000000000000000000000000A31 /* BinTV.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BinTV.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		00000000000000000000000000000A41 /* PhimLocalServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhimLocalServer.swift; sourceTree = "<group>"; };
+		00000000000000000000000000000A43 /* PhimWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhimWebView.swift; sourceTree = "<group>"; };
+		00000000000000000000000000000A47 /* Web */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Web; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		00000000000000000000000000000C01 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		00000000000000000000000000000D01 = {
+			isa = PBXGroup;
+			children = (
+				00000000000000000000000000000D02 /* BinTV */,
+				00000000000000000000000000000D0A /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		00000000000000000000000000000D02 /* BinTV */ = {
+			isa = PBXGroup;
+			children = (
+				00000000000000000000000000000D03 /* App */,
+				00000000000000000000000000000D04 /* Views */,
+				00000000000000000000000000000D05 /* Models */,
+				00000000000000000000000000000D06 /* Services */,
+				00000000000000000000000000000D07 /* Player */,
+				00000000000000000000000000000D08 /* Storage */,
+				00000000000000000000000000000D09 /* Subtitle */,
+			00000000000000000000000000000D10 /* Phim */,
+				00000000000000000000000000000A21 /* Assets.xcassets */,
+				00000000000000000000000000000A23 /* Main.storyboard */,
+				00000000000000000000000000000A19 /* Info.plist */,
+			);
+			name = BinTV;
+			path = BinTV;
+			sourceTree = "<group>";
+		};
+		00000000000000000000000000000D03 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				00000000000000000000000000000A01 /* App.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		00000000000000000000000000000D04 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				00000000000000000000000000000A03 /* ContentView.swift */,
+				00000000000000000000000000000A05 /* LiveTVView.swift */,
+				00000000000000000000000000000A07 /* MovieListView.swift */,
+				00000000000000000000000000000A09 /* SettingsView.swift */,
+				00000000000000000000000000000A0B /* PlayerView.swift */,
+				0000000000000000000000000000A51 /* UIProportions.swift */,
+				0000000000000000000000000000A59 /* GestureOverlayMenuView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		00000000000000000000000000000D05 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				00000000000000000000000000000A0D /* Channel.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		00000000000000000000000000000D06 /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				00000000000000000000000000000A0F /* StreamService.swift */,
+				00000000000000000000000000000A11 /* NetworkService.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		00000000000000000000000000000D07 /* Player */ = {
+			isa = PBXGroup;
+			children = (
+				00000000000000000000000000000A13 /* AVPlayerManager.swift */,
+			);
+			path = Player;
+			sourceTree = "<group>";
+		};
+		00000000000000000000000000000D08 /* Storage */ = {
+			isa = PBXGroup;
+			children = (
+				00000000000000000000000000000A15 /* Preferences.swift */,
+			);
+			path = Storage;
+			sourceTree = "<group>";
+		};
+		00000000000000000000000000000D09 /* Subtitle */ = {
+			isa = PBXGroup;
+			children = (
+				00000000000000000000000000000A17 /* VTTLoader.swift */,
+			);
+			path = Subtitle;
+			sourceTree = "<group>";
+		};
+		00000000000000000000000000000D0A /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				00000000000000000000000000000A31 /* BinTV.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		00000000000000000000000000000D10 /* Phim */ = {
+			isa = PBXGroup;
+			children = (
+				00000000000000000000000000000A41 /* PhimLocalServer.swift */,
+				00000000000000000000000000000A43 /* PhimWebView.swift */,
+				00000000000000000000000000000A47 /* Web */,
+			);
+			path = Phim;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		00000000000000000000000000000E01 /* BinTV */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 00000000000000000000000000000F01 /* Build configuration list for PBXNativeTarget "BinTV" */;
+			buildPhases = (
+				00000000000000000000000000000C11 /* Sources */,
+				00000000000000000000000000000C01 /* Frameworks */,
+				00000000000000000000000000000C13 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = BinTV;
+			productName = BinTV;
+			productReference = 00000000000000000000000000000A31 /* BinTV.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		00000000000000000000000000000E09 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1540;
+				TargetAttributes = {
+					00000000000000000000000000000E01 = {
+						CreatedOnToolsVersion = 15.4;
+					};
+				};
+			};
+			buildConfigurationList = 00000000000000000000000000000F02 /* Build configuration list for PBXProject "BinTV" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				vi,
+				Base,
+			);
+			mainGroup = 00000000000000000000000000000D01;
+			productRefGroup = 00000000000000000000000000000D0A /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				00000000000000000000000000000E01 /* BinTV */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		00000000000000000000000000000C13 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				00000000000000000000000000000B21 /* Assets.xcassets in Resources */,
+				00000000000000000000000000000B23 /* Main.storyboard in Resources */,
+			00000000000000000000000000000B47 /* Web in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		00000000000000000000000000000C11 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				00000000000000000000000000000B01 /* App.swift in Sources */,
+				00000000000000000000000000000B03 /* ContentView.swift in Sources */,
+				00000000000000000000000000000B05 /* LiveTVView.swift in Sources */,
+				00000000000000000000000000000B07 /* MovieListView.swift in Sources */,
+				00000000000000000000000000000B09 /* SettingsView.swift in Sources */,
+				00000000000000000000000000000B0B /* PlayerView.swift in Sources */,
+				00000000000000000000000000000B0D /* Channel.swift in Sources */,
+				00000000000000000000000000000B0F /* StreamService.swift in Sources */,
+				00000000000000000000000000000B11 /* NetworkService.swift in Sources */,
+				00000000000000000000000000000B13 /* AVPlayerManager.swift in Sources */,
+				00000000000000000000000000000B15 /* Preferences.swift in Sources */,
+				00000000000000000000000000000B17 /* VTTLoader.swift in Sources */,
+				0000000000000000000000000000B51 /* UIProportions.swift in Sources */,
+				0000000000000000000000000000B59 /* GestureOverlayMenuView.swift in Sources */,
+			00000000000000000000000000000B41 /* PhimLocalServer.swift in Sources */,
+			00000000000000000000000000000B43 /* PhimWebView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		00000000000000000000000000000F11 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "";
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		00000000000000000000000000000F12 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "";
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 5.0;
+				VALIDATE_PRODUCT = NO;
+			};
+			name = Release;
+		};
+		00000000000000000000000000000F21 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 230;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = BinTV/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 2.5.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.bintv.ios;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		00000000000000000000000000000F22 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 230;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = BinTV/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 2.5.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.bintv.ios;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		00000000000000000000000000000F01 /* Build configuration list for PBXNativeTarget "BinTV" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				00000000000000000000000000000F21 /* Debug */,
+				00000000000000000000000000000F22 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		00000000000000000000000000000F02 /* Build configuration list for PBXProject "BinTV" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				00000000000000000000000000000F11 /* Debug */,
+				00000000000000000000000000000F12 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 00000000000000000000000000000E09 /* Project object */;
+}

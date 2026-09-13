@@ -1,0 +1,377 @@
+# BinTV iOS — TrollStore Build (FIXED)
+
+## Build by GitHub Actions
+
+1. Upload this repository to GitHub
+2. Go to **Actions** → **"Build unsigned IPA (TrollStore)"**
+3. Click **Run workflow** (defaults: Xcode mặc định, Release, mode `archive`)
+4. Wait for the job to finish
+5. Download artifact **`BinTV-trollstore-unsigned`** — bên trong là **`BinTV.ipa`**
+
+Nếu build thất bại:
+- Mở trang **Job summary** — 15 dòng `error:` gần nhất được in sẵn ở đó.
+- Tải artifact **`BinTV-build-log`** để xem `xcodebuild.log` đầy đủ.
+- Buoc **Preflight** chặn sớm các lỗi phổ biến: file Swift thiếu trong
+  Compile Sources, UUID rác trong pbxproj, scheme chỉ đến target sai,
+  Info.plist/bundle ID không đọc được.
+
+## What was fixed (ban FIXED)
+
+- `BinTV.xcscheme`: `BlueprintIdentifier` trỏ sai UUID target →
+  `xcodebuild -scheme BinTV` lỗi ngay bước đầu. Đã trỏ đúng target `BinTV`.
+- `project.pbxproj`: kiểm tra lại đầy đủ — 12 file Swift trong Compile
+  Sources, không UUID treo, `AppDelegate.swift` cố ý KHÔNG build (trùng
+  khai báo với `App.swift`, đánh dấu `ci-skip`).
+- `StreamService.swift`: bỏ `@MainActor` (gây lỗi khởi tạo ở một số
+  phiên bản Swift), các cập nhật `@Published` chuyển về MainActor bằng
+  `MainActor.run` — giữ nguyên hành vi UI.
+- `import Combine` bổ sung cho `StreamService`, `NetworkService`,
+  `AVPlayerManager` (cần cho `ObservableObject`/`@Published`).
+- `Info.plist`: thêm `UILaunchScreen`, bỏ 2 key rác
+  (`UITabBarController`, `UIViewControllerBasedStatusBarAppearance`).
+- `Assets.xcassets`: thêm `Contents.json` gốc; resize 8 icon AppIcon về
+  đúng kích thước chuẩn (40/60/58/87/80/120/120/180) — actool không nhận
+  icon 1024 cho tất cả các slot.
+- `PlayerView.swift`: keypath `\.self` chuẩn hóa.
+- Workflow: `archive` mặc định (tạo `.xcarchive`), `set -o pipefail` +
+  `PIPESTATUS` (tee không còn che exit code), kiểm tra `.xcarchive`,
+  tìm `.app` thật bằng `find`, tạo `BinTV.ipa`, kiểm tra IPA sâu
+  (Payload/*.app, Info.plist, executable +x, Mach-O arm64/arm64e iOS,
+  không có file `._`), upload IPA + build log artifact.
+
+## Install with TrollStore
+
+1. Transfer `BinTV.ipa` to your iPhone
+2. Open TrollStore
+3. Tap `BinTV.ipa`
+4. Install → Done
+5. Open BinTV from home screen
+
+## Install with TrollStore
+
+1. Transfer `BinTV.ipa` to your iPhone
+2. Open TrollStore
+3. Tap `BinTV.ipa`
+4. Install → Done
+5. Open BinTV from home screen
+
+## Project Structure
+
+- `BinTV/App/` — App entry and delegate
+- `BinTV/Views/` — SwiftUI screens (Live TV, Player, Settings, Movies)
+- `BinTV/Models/` — Channel / Stream data models
+- `BinTV/Services/` — Network and stream loading
+- `BinTV/Player/` — AVPlayer management
+- `BinTV/Subtitle/` — WebVTT subtitle loader
+- `BinTV/Storage/` — UserDefaults preferences
+- `BinTV/Assets.xcassets/` — App icons from BinTV.png
+- `.github/workflows/build-ipa.yml` — CI pipeline
+
+## Note
+
+This port maintains the original BinTV functionality for iOS: live TV streams, multi-server selection, video playback, subtitle support, and no-login access. Exact stream endpoints should be verified from the original APK API responses if needed; default network layer uses configurable base URL.
+
+---
+
+## Fix 2026-09-12 (build 217) — Landscape lock + PHIM playback restored
+
+Two targeted fixes on top of the existing port (no rewrite, no new dependencies,
+web assets untouched byte-for-byte):
+
+1. **Playback (root cause):** `WKWebViewConfiguration.allowsInlineMediaPlayback = true`
+   was missing (default `false` on iPhone) — WebKit ignored the `playsinline`
+   attribute and hijacked `<video>` into a native fullscreen player that cannot
+   render hls.js/MSE content, producing "Không thể phát nguồn phim này trên TV".
+   Set before `WKWebView(frame:configuration:)` init in `BinTV/Phim/PhimWebView.swift`,
+   plus a passive `[PHIM_DEBUG]` media-event observer for on-device verification.
+2. **Orientation (3 layers):** Info.plist landscape-only for iPhone **and iPad**,
+   new per-window `application(_:supportedInterfaceOrientationsFor:) -> .landscape`
+   in `AppDelegate` (clamps WebKit/AVKit fullscreen windows, sheets, alerts), and
+   hardened geometry requests (never portrait, both landscape directions, correct
+   `UIDeviceOrientation` KVC domain on iOS 15). Independent of Rotation Lock by design.
+
+Also: structured `[PHIM_DEBUG] Step -> Action -> Status -> Payload` logging with
+token sanitization across `PhimLocalServer`/`PhimWebView`; build number 216 → 217.
+
+- Full technical report (Vietnamese): `BAOCAO-KYTHUAT-FIX-2026-09-12.md`
+- Mock E2E test suite (Node ≥18 / Python ≥3.9, no extra deps): `cd tests/mock-e2e && node run_all.js` — 244/244 assertions pass (T1 real app.js slices, T2 m3u8 rewrite port, T3 live-HTTP proxy chain with Referer-gated mock CDN, T4 project consistency).
+
+## Fix UI 2026-09-12 (build 218) — Tabbed Browser UI + Adaptive Scaling
+
+- Browser-style tab strip on top (open/close/select tabs, "+" → New Tab
+  Page speed-dial icon grid); closing a tab only detaches it from the
+  strip — the 4 underlying pages stay alive in the same TabView (tags
+  0…3), so playback/state is never destroyed.
+- Long-press ≥0.35s (unchanged gesture plumbing) now toggles the tab
+  strip for immersive video; a small top grabber restores it.
+- All app-drawn chrome scales via `UIProportions` (env `\.uiProps`):
+  scale = clamp(landscapeHeight/390, 0.82, 1.15) — iPhone SE … Pro Max …
+  iPad. Removed hard-coded 230pt Settings column, 40×40 TUBE buttons,
+  140pt grid minimum.
+- New files: `Views/{UIProportions,BrowserTabs,BrowserTabBar,NewTabPageView}.swift`
+  (registered in pbxproj). Orientation lock & playback fix untouched.
+- Version 217 → 218, MARKETING_VERSION 2.1.6 → 2.2.0. Test suite now
+  310/310 (see `tests/mock-e2e/`).
+
+## Fix UI 2026-09-12 (build 219) — Fullscreen + Long-press Overlay Menu
+
+- Removed the top browser tab strip (build 218) and kept the system bottom
+  tab bar permanently hidden: content now fills the screen edge-to-edge
+  (no nav bar, 0 spacing top/bottom).
+- Navigation: long-press ≥0.35s anywhere → blurred fullscreen overlay
+  (`.ultraThinMaterial` + dim) with 4 ICON-ONLY buttons (tv / film /
+  popcorn / gear — no text labels, VoiceOver labels only). Tap an icon →
+  switches page instantly and dismisses; tap backdrop → dismiss only.
+- Gesture plumbing unchanged (proven UIKit recognizers: global on
+  UITabBarController + per-webview on TUBE/PHIM; no SwiftUI
+  onLongPressGesture → no scroll/tap/video-control conflicts).
+- Removed files: `Views/BrowserTabs.swift`, `Views/BrowserTabBar.swift`,
+  `Views/NewTabPageView.swift` (also de-registered from pbxproj).
+  Added: `Views/GestureOverlayMenuView.swift`.
+- Adaptive scaling (build 218) retained; overlay metrics scale SE…iPad.
+- Version 218 → 219, MARKETING_VERSION 2.2.0 → 2.3.0. Tests: 302/302.
+
+## Preflight CI fix 2026-09-12 (no app version change — still 219/2.3.0)
+
+- Root cause of the GitHub Actions failure at step `Preflight (pbxproj +
+  scheme vs source files)`: repo still contained the three deprecated
+  build-218 files (`BrowserTabs/BrowserTabBar/NewTabPageView.swift`)
+  while the new pbxproj no longer registers them → preflight error
+  "3 file .swift/.m KHONG nam trong Compile Sources". Fix = DELETE those
+  three files on GitHub (zip patches cannot express deletions — see
+  `PREFLIGHT-FIX-INSTRUCTIONS.txt` inside the preflight patch zip).
+- Preflight hardened (workflow): new two-way check 2.1b — every
+  Compile Sources entry must exist on disk (catches the mirrored case
+  "Build input file cannot be found" BEFORE xcodebuild wastes minutes);
+  actionable fix hints printed for both failure directions; still
+  `sys.exit(rc)` — no error masking.
+- Tests: new T4.9 guards the CI gate itself. Suite now 314/314.
+
+## xbuild.log 2026-09-12 (workflow only — still 219/2.3.0)
+
+- Every run now produces ONE consolidated log: `build/Output/xbuild.log`,
+  uploaded as artifact **`xbuild-log`** (`if: always()`) — including runs
+  that fail early at Detect/Preflight (the old `xcodebuild.log` was only
+  created at the Build step, so early failures had no downloadable log).
+- New `Init xbuild.log` step right after checkout writes a header (UTC
+  time, run URL, ref/sha, inputs, runner). Each script step is wrapped:
+  `{ ... } 2>&1 | tee -a "$XLOG"` + `exit "${PIPESTATUS[0]}"` with a
+  `[STEP END] <name> exit=N` marker — real exit codes preserved (bash
+  3.2-safe, no error masking).
+- Build step runs xcodebuild directly (`RC=$?`); its full output flows
+  into xbuild.log through the wrapper. Job summary + failure printer now
+  read xbuild.log. Tests: 318/318 (T4.9 guards the logging pipeline).
+
+## IPA build fix 2026-09-12 (from real xbuild.log, run 34690803983)
+
+- Root cause of the failed run: repo still carried the three deprecated
+  build-218 files while pbxproj 219 no longer registers them → Preflight
+  correctly failed (`3 file ... KHONG nam trong Compile Sources`).
+- Fix without manual deletion: the three files are replaced by TOMBSTONES
+  (comment-only, zero code) whose first line is `// ci-skip: DEPRECATED
+  build 219 ...` — the workflow's own documented intentional-exclusion
+  mechanism, printed transparently in every log. Delete them for real
+  whenever convenient; the build does not change.
+- Workflow wrapper fix found via the real log: GitHub runs `shell: bash`
+  as `bash -eo pipefail`, which aborted failing steps BEFORE the
+  `[STEP END]` marker; added `set +e` around the tee pipelines (real
+  exit codes still returned) and around `xcodebuild` (RC capture).
+- Tests: 326/326. xcodebuild/archive/IPA on a real runner: NOT VERIFIED
+  from this sandbox — the next Actions run is the gate.
+
+## Nav gestures + PHIM black-screen fix 2026-09-12 (build 220 / 2.4.0)
+
+- Menu stays hidden by default (fullscreen); second reveal gesture added:
+  swipe in from the RIGHT screen edge (parallel to long-press). Menu can
+  no longer open invisibly under the player sheet.
+- Swipe in from the LEFT edge = Back exactly one step, in navigation
+  order: overlay menu -> player sheet -> webview history (canGoBack) ->
+  no-op at root (never quits the app).
+- PHIM black screen after tab switching: root cause = missing
+  `webViewWebContentProcessDidTerminate` (terminated WebContent process
+  leaves a permanently black WKWebView). Fixed with the official delegate
+  (reload ONLY on process death; localStorage cache survives) plus a
+  `setNeedsDisplay()` repaint on tab re-appear (no needless reload, state
+  preserved). Same lifecycle fix applied to TUBE's webview.
+- New gestures use cancelsTouchesInView=false / delaysTouchesBegan=false:
+  video controls, scrolling and web taps unaffected. Tests: 338/338.
+
+## Menu bar thật sự biến mất + Back cạnh trái + PHIM giữ trạng thái (build 221 / 2.4.1)
+
+Root cause của "menu bar vẫn hiện" ở bản 219/220: `TabChromeController`
+(UIViewControllerRepresentable gắn ở `.background()` NGOÀI `NavigationView`)
+đi NGƯỢC lên `vc.parent` để tìm `UITabBarController`, trong khi
+UITabBarController là HẬU DUỆ của root hosting controller → không bao giờ
+tìm thấy → `tabBar.isHidden` không chạy (bar vẫn hiện) và cả long-press
+global lẫn 2 edge-pan cũng không bao giờ được gắn.
+
+- **Bỏ hẳn `TabView`**: 4 trang xếp trong `ZStack` do `ContentView` điều
+  khiển → không có UITabBarController → không có menu bar nào để ẩn, và
+  nội dung chiếm TOÀN BỘ màn hình (lấy lại đúng vùng bar cũ).
+- **Giữ trang trong hierarchy**: `mountedTabs` — trang đã mở thì không bao
+  giờ bị gỡ (webview PHIM/TUBE không rời window) → hết màn hình đen, giữ
+  nguyên trạng thái đang xem, không reload.
+- **Gesture gắn thẳng trên `UIWindow`** (tổ tiên của mọi view, phủ cả
+  sheet): giữ ≥0.35s = menu; vuốt cạnh phải = menu; vuốt cạnh trái = Back
+  1 bước (menu → sheet player → lịch sử webview → lùi tab trước đó → root
+  no-op, không bao giờ thoát app).
+- **Delegate `shouldReceive`** nhường vùng có gesture riêng: WKWebView
+  (long-press riêng của webview; swipe back/forward nội bộ của TUBE),
+  UIControl/ô nhập liệu (chọn/paste), menu đang mở, player sheet → không
+  xung đột với thao tác vuốt/điều khiển video hiện có.
+- PHIM: thêm `restoreIfEmpty()` (chỉ nạp lại khi webview thật sự trống,
+  tối đa 3 lần, reset khi tải xong) bên cạnh
+  `webViewWebContentProcessDidTerminate` đã có ở bản 220.
+- Tests: **430/430 PASS** (T1 40 + T2 55 + T3 53 + T4 211 + **T5 71** —
+  mirror state-machine của luồng menu/Back/PHIM). Swift parse-check toàn
+  bộ file bằng toolchain Swift thật: PASS (không có macOS/UIKit → chưa
+  compile/link; cổng xác nhận = GitHub Actions build 221).
+
+## Back cạnh trái: vuốt mép TỰ PHÁT HIỆN (build 222 / 2.4.2)
+
+`UIScreenEdgePanGestureRecognizer` gắn trên `UIWindow` bị hệ thống "gate"
+mất quyền ưu tiên ở vùng mép màn hình → triệu chứng thực tế: giữ màn hình
+hiện menu được, nhưng vuốt cạnh trái không Back. Thay bằng
+`BinTVEdgeSwipeRecognizer` (`UIPanGestureRecognizer` + tự tính vùng mép):
+bắt đầu trong dải `min(max(width×0.09, 30), 70)` pt sát mép, vuốt NGANG
+≥45pt (`|x| > |y|·1.5`) → Back (trái) / hiện menu (phải), **đúng 1 lần cho
+mỗi lần vuốt**. Vẫn gắn trên window (phủ cả sheet player), chỉ gắn trên
+window thật của app, gắn lại khi app trở lại foreground. Root Back: rung
+xác nhận, không thoát app. Tests: **462/462 PASS** (có T5.5 mô phỏng nhận
+diện vuốt).
+
+## LIVE TV: sửa nút fullscreen (đen màn hình + dừng phát) — build 223 / 2.4.3
+
+Đang phát LIVE TV, bấm nút fullscreen (mũi tên 2 chiều) → video dừng và
+player đen. Hai nguyên nhân gốc, sửa cả hai:
+
+1. **Thiếu view-controller containment.** `GravityVideoPlayer` cũ là
+   `UIViewRepresentable` trả `coordinator.view` — lấy **view** của
+   `AVPlayerViewController` mà không bao giờ `addChild`. Nút fullscreen của
+   AVKit kích hoạt **full screen presentation** (thao tác cấp view
+   controller) ⇒ thiếu VC cha = vùng chứa không hiển thị ⇒ **đen**. Đổi sang
+   **`UIViewControllerRepresentable`** (SwiftUI tự lo containment).
+2. **AVKit pause player khi chuyển chế độ trình bày** (hành vi đã biết).
+   Coordinator nay làm `AVPlayerViewControllerDelegate`: nhớ trạng thái phát
+   (`rate > 0`) và gọi lại `play()` **sau** khi transition kết thúc (bỏ qua
+   khi `isCancelled`) — cả khi vào lẫn khi thoát fullscreen; PiP không tự
+   đóng player inline.
+
+Không tự gây gián đoạn: `update` chỉ gán lại player/gravity khi thật sự đổi
+(so bằng `rawValue`), và `dismantle` **không** tháo player. FIT/FILL, chế độ
+TV khóa ngang và việc dọn player khi đóng sheet giữ nguyên. Tests:
+**480/480 PASS** (T4.12 có 18 assertion mới).
+
+## Đồng bộ player chuẩn iOS + giao diện lưới PHIM + fix PHIM đen khi ở nền — build 224 / 2.4.4
+
+**1. Một player chuẩn iOS dùng chung.** `BinTVNativePlayer` =
+`UIViewControllerRepresentable` bọc `AVPlayerViewController` (đúng view
+controller nằm sau SwiftUI `VideoPlayer`, containment đầy đủ) → điều khiển
+gốc của iOS: phát/tạm dừng, tua, AirPlay, PiP, fullscreen. **Pinch 2 ngón**
+đổi chế độ xem: PHÓNG TO = **FIT → FILL → FULL** (mỗi bước 18% tỉ lệ, reset
+sau mỗi bước; FULL = `fullScreenCover` dùng CHUNG một `AVPlayer` nên không
+tải lại, không gián đoạn); THU NHỎ đi ngược lại. Pinch chạy đồng thời với
+gesture của AVKit (không cướp thao tác).
+- **Đã loại bỏ logic tự dựng:** xoá `phim_player_ui.js` (HUD player của
+  PHIM) và xoá thanh điều khiển tự dựng của LIVE TV — trùng chức năng với
+  điều khiển gốc + pinch. TUBE giữ nguyên WebKit native fullscreen (đã là
+  player chuẩn iOS; không cướp quyền YouTube sang AVPlayer vì URL có chữ ký,
+  dễ hỏng phát).
+- PHIM **không tự** bật fullscreen (`AUTO_FULLSCREEN = false`): player
+  fullscreen là lớp phủ của hệ thống → phụ đề/danh sách tập dạng DOM sẽ bị
+  ẩn. Vào player native bằng 1 chạm vào nút fullscreen chuẩn của iOS.
+
+**2. Giao diện tab PHIM:** 4 thẻ/hàng (từ 6), lưới tràn sát 2 viền màn hình
+(chỉ chừa safe-area), poster giữ đúng 16:9, **tên phim + năm sản xuất
+xuống dưới ảnh** (bỏ gradient phủ lên poster) → thẻ cao ≈160px (gấp ≈2,3
+lần), chữ to hơn.
+
+**3. Tab PHIM đen sau khi ra màn hình chính:** xử lý đúng 3 cơ chế gốc —
+(1) WebContent process chết lúc ở nền → **hoãn** reload tới khi app active
+(reload lúc nền không hoàn tất = đen); (2) socket server nội bộ bị đóng →
+đảm bảo server sống **trước** khi reload; (3) webview không vẽ lại → ép
+`setNeedsLayout/setNeedsDisplay` + đọc layout/`resize`. Reload chỉ khi thăm
+dò DOM xác nhận webview thật sự trống; còn nội dung thì chỉ vẽ lại, không
+reload (giữ nguyên phim đang xem).
+
+Tests: **515/515 PASS** (T4.13–T4.16 mới). JS inject kiểm bằng `node --check`.
+
+## PHIM: toàn màn hình (viewport) + thẻ phim dãn kín + sửa màn hình đen khi ở nền — build 225 / 2.4.5
+
+**A. PHIM không toàn màn hình / còn viền đen 2 bên — root cause là viewport.**
+`index.html` khai báo `width=1920,height=1080` (bố cục TV) nên trang bị thu nhỏ
+vừa màn hình iPhone (~764px trong 932px) → nội dung nhỏ + lộ ~84px đen mỗi
+bên. Script `viewportFixJS` chạy ở **document start** ép đúng
+`width=device-width, initial-scale=1, viewport-fit=cover` (và chặn zoom trang).
+
+**B. Thẻ phim:** `flex: 1 1 calc(25% - 10px)` — có `flex-grow` nên thẻ tự dãn
+lấp kín chiều ngang (cả hàng cuối), `max-width: calc(50% - 10px)` để không
+bao giờ phình quá nửa hàng; bỏ hẳn padding ngang; poster vẫn **16/9** (không
+méo, không crop); chữ tên 15px / năm 13px.
+
+**C. Màn hình đen khi ra Home rồi mở lại — mọi đường đều có hạn mức:**
+- **Watchdog 3s**: không chứng minh được webview sống **và đang vẽ** → nạp lại.
+- **Kiểm tra thật sự đang vẽ** bằng `callAsyncJavaScript` +
+  **`requestAnimationFrame`** (DOM sống nhưng không vẽ vẫn là đen — trường hợp
+  build 224 bỏ sót vì `evaluateJavaScript` có thể không bao giờ gọi về).
+- Ép vẽ lại: `setNeedsLayout/setNeedsDisplay` + **nudge scroll 1px**.
+- Tối đa 2 lần nạp lại mỗi lượt foreground; chứng minh được còn sống thì
+  **không reload** (giữ nguyên phim đang xem).
+
+Tests: **517/517 PASS** (T4.17–T4.18 mới). JS inject kiểm bằng `node --check`.
+
+## Sửa lỗi biên dịch CI của build 225 + guard chống lặp lại — build 226 / 2.4.6
+
+Run CI của 225 lỗi `exit 65` vì **2 nguyên nhân**:
+1. Patch thay thế theo vùng đã **xoá nhầm 3 hàm** (`configureAudioSession`,
+   `injectStatusBarInset`, `injectStatusBarInsetPublic`) → "cannot find … in
+   scope". Đã khôi phục nguyên vẹn từ bản 224 (đối chiếu byte) và rà lại toàn
+   bộ danh sách khai báo.
+2. Gọi sai chữ ký `callAsyncJavaScript` (thiếu nhãn `in` thứ hai của
+   `contentWorld`) → "extra trailing closure passed in call". Đã bỏ hẳn API
+   này, kiểm tra "đang vẽ" bằng **2 bước `evaluateJavaScript`**: gắn bộ đếm
+   `requestAnimationFrame` → đọc lại sau 900 ms (≥2 khung = đang vẽ).
+
+**Guard mới T4.19:** `baseline_symbols.json` lưu 640 khai báo của 20 file
+Swift (tạo bằng `tests/mock-e2e/make_baseline.py`); test soi từng khai báo và
+**fail ngay** nếu có cái biến mất khỏi mã nguồn (kể cả khi bị đẩy vào
+comment). Guard tự kiểm chứng bằng cách giả lập xoá 1 hàm.
+
+### Build 228 (2.4.8) — PHIM toàn màn hình + lưới phim + hết màn hình đen
+
+- **Toàn màn hình PHIM (root cause):** `PhimLocalServer` **viết lại
+  `<meta name="viewport">` ngay trong HTML trả về** (`width=device-width,
+  viewport-fit=cover`) — không dùng script chạy sau, không phụ thuộc cache.
+- **Lưới phim (root cause):** CSS được **tiêm từ mã Swift** (`layoutFixJS` mỗi
+  lần nạp trang, `!important`) vì file CSS trong bundle có thể stale/cache:
+  4 thẻ/hàng + `flex-grow` dãn kín, bỏ padding ngang, sidebar 100px, lề an toàn
+  ghỉm tối đa 20px, poster **16/9 + `object-fit:cover`** (hết letterbox, không
+  méo), tên + năm nằm dưới ảnh.
+  → iPhone 14 Pro Max ngang: thẻ **116pt → 190pt** (+64%).
+- **Hết màn hình đen (root cause):** lưới render 0 thẻ trong khi DOM vẫn sống
+  nên mọi kiểm tra "còn sống" cũ đều vô tác dụng. Cơ chế mới **đo trạng thái
+  render thật** (số thẻ / `player-active` / bề rộng lưới) rồi xử lý theo
+  nguyên nhân: gỡ class ẩn → làm mới bằng chính luồng web app (click lại danh
+  mục, giữ trạng thái) → nạp lại bỏ cache (+ kiểm tra `/health`, nối lại
+  listener nếu socket chết) → tối đa 3 lần → overlay "Thử lại".
+
+### Build 229 (2.4.9) — Module PHIM theo chuẩn Stremio addon (đa nguồn)
+
+- **File mới `BinTV/Phim/Web/assets/stremio.js`**: client Stremio thuần giao thức —
+  không chứa URL nào (đã có assertion kiểm chứng). Nhận diện manifest/catalog/meta/stream
+  theo chuẩn, phân loại mọi loại stream (`url` HLS/mp4 · `ytId` · `infoHash`/torrent →
+  magnet · `externalUrl` · `behaviorHints.headers`), dùng `idPrefixes`/`resources` để
+  biết addon nào phục vụ id nào.
+- **JSONBin**: ưu tiên `target_urls` (mảng), fallback `target_url` (tương thích cấu hình
+  cũ), quét đệ quy mọi dạng lồng nhau → sửa `target_urls` là app tự nhận nguồn mới,
+  không cần build lại.
+- **Nạp song song + chịu lỗi**: một addon lỗi/timeout bị bỏ qua, không ảnh hưởng các addon khác.
+- **Gộp**: catalog của mọi addon thành **một danh sách PHIM** (mỗi catalog nhớ `_addon`);
+  **tìm kiếm** chạy trên tất cả addon (`/catalog/<type>/<id>/search=<q>.json`);
+  danh sách kết quả được **khử trùng** rồi **sắp xếp theo năm sản xuất** bằng đúng
+  logic cũ (`sortMovieItemsByProductionYear` — không đổi).
+- **Stream**: hỏi TẤT CẢ addon phù hợp, gộp + gỡ trùng + ưu tiên nguồn phát được,
+  tự gắn `Referer` từ `behaviorHints.headers` vào proxy. Khi không phát được sẽ báo
+  **đúng nguyên nhân** (torrent cần debrid / YouTube / mở ngoài) thay vì chung chung.
+- Kiểm chứng: `node tests/mock-e2e/run_all.js` → T1–T5 **579/579**;
+  `node tests/stremio-e2e/run.js` (dữ liệu thật) → **44/44** (có trong T6 của run_all).

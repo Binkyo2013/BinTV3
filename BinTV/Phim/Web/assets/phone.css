@@ -1,0 +1,281 @@
+/* =====================================================
+   PHIM - PHONE / TOUCH OVERRIDE (Android)
+   Chi duoc nap khi MainActivity tai ?android=phone.
+   Ban TV giu nguyen style.css 1920x1080 nhu Electron.
+   Ghi chu: khong doi ten class, khong them bot phan tu -
+   chi override kich thuoc/typography cho man hinh hep,
+   moi logic va cau truc DOM van do app.js dieu khien.
+   ===================================================== */
+
+/* ---------- Header ---------- */
+.movie-browser-header {
+    height: 64px;
+    padding: 10px 14px;
+    gap: 10px;
+}
+.movie-browser-title { font-size: 24px; }
+.movie-browser-catalog-title { font-size: 15px; }
+.movie-browser-body { height: calc(100% - 64px); }
+
+/* ---------- Sidebar danh muc ---------- */
+.movie-catalogs {
+    flex: 0 0 148px;
+    width: 148px;
+    padding: 10px 8px;
+}
+.movie-catalog-row {
+    min-height: 44px;
+    margin: 4px 0;
+    padding: 10px 12px;
+    border-radius: 9px;
+    font-size: 14px;
+}
+.movie-catalog-group-title {
+    margin: 12px 4px 4px;
+    padding: 0 6px;
+    font-size: 12px;
+    letter-spacing: .5px;
+}
+
+/* ---------- Khung noi dung + status ---------- */
+.movie-content { padding: 38px 10px 10px; }
+.movie-status { left: 12px; right: 12px; top: 10px; font-size: 13px; }
+
+/* ---------- Luoi the phim: 2 the/hang, THE THAP (chieu cao ~1/2 ban cu).
+   Poster vuong 1:1, ten phim + nam PHU LEN poster bang gradient -> khong
+   con khoi chu lam tang chieu cao the. 12+ the/moi man hinh thay vi ~6. ---------- */
+.movie-grid { padding: 6px 4px 28px; }
+.movie-card {
+    position: relative;
+    flex: 0 0 calc(50% - 14px);
+    margin: 0 7px 12px;
+    padding: 0;
+    border-width: 2px;
+    border-radius: 10px;
+    overflow: hidden;
+}
+.movie-card-poster {
+    display: block;
+    width: 100%;
+    height: auto;
+    aspect-ratio: 1 / 1;
+    border-radius: 8px;
+    background: #292931;
+}
+/* Gradient den duoi poster de chu doc ro */
+.movie-card::after {
+    content: "";
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    height: 62px;
+    background: linear-gradient(to top, rgba(0, 0, 0, .92), rgba(0, 0, 0, 0));
+    pointer-events: none;
+    border-radius: 0 0 8px 8px;
+}
+.movie-card-name {
+    position: absolute;
+    left: 7px; right: 7px; bottom: 25px;
+    height: auto;
+    margin: 0;
+    font-size: 12.5px;
+    line-height: 1.15;
+    text-shadow: 0 1px 3px #000, 0 0 6px #000;
+}
+.movie-card-meta {
+    position: absolute;
+    left: 7px; right: 7px; bottom: 7px;
+    height: auto;
+    margin: 0;
+    font-size: 11px;
+    text-shadow: 0 1px 3px #000;
+}
+/* Luoi TV (truyen hinh): the 16:9 thap */
+.movie-grid.movie-grid-tv .movie-card-poster {
+    height: auto;
+    aspect-ratio: 16 / 9;
+}
+/* Skeleton phu hop layout chu tren poster */
+.movie-skeleton-name { position: absolute; bottom: 25px; left: 7px; width: 70%; }
+.movie-skeleton-meta { position: absolute; bottom: 7px; left: 7px; width: 45%; }
+/* Phan hoi cham thuoc phan cam ung */
+.movie-card:active {
+    border-color: #fff;
+    background: rgba(255, 255, 255, .18);
+}
+
+/* ---------- Nut loc / tim kiem o header ---------- */
+.movie-filter-bar { gap: 7px; }
+.movie-filter-button {
+    min-width: 76px;
+    height: 38px;
+    padding: 0 10px;
+    border-radius: 8px;
+    font-size: 13px;
+}
+.movie-search-button {
+    min-width: 100px;
+    height: 38px;
+    padding: 0 10px;
+    gap: 6px;
+    border-radius: 8px;
+    font-size: 13px;
+}
+.movie-search-button-mic { font-size: 15px; }
+
+/* ---------- Dialog tim kiem ---------- */
+.movie-search-dialog {
+    width: 94vw;
+    max-width: 560px;
+    padding: 20px 18px 16px;
+    border-radius: 16px;
+}
+.movie-search-title { font-size: 22px; }
+.movie-search-status { min-height: 20px; margin: 8px 0 14px; font-size: 13px; }
+.movie-search-input { height: 52px; padding: 0 14px; border-radius: 10px; font-size: 18px; }
+.movie-search-actions { gap: 10px; margin-top: 16px; }
+.movie-search-action { min-width: 132px; height: 50px; border-radius: 10px; font-size: 16px; }
+.movie-search-keyboard-icon { font-size: 18px; }
+.movie-search-help { margin-top: 14px; font-size: 12px; }
+
+/* ---------- Dialog loc phim ---------- */
+.movie-filter-menu-dialog {
+    width: 94vw;
+    max-width: 420px;
+    max-height: 82vh;
+    padding: 18px;
+    border-radius: 16px;
+}
+.movie-filter-menu-title { margin-bottom: 14px; font-size: 22px; }
+.movie-filter-menu-list { gap: 7px; }
+.movie-filter-menu-option {
+    min-height: 46px;
+    padding: 12px 16px;
+    border-radius: 9px;
+    font-size: 16px;
+}
+.movie-filter-menu-option:active {
+    border-color: #fff;
+    background: #fff;
+    color: #111;
+}
+.movie-filter-menu-help { margin-top: 12px; font-size: 12px; }
+
+/* ---------- Dialog chon tap ---------- */
+.movie-episodes-dialog {
+    width: 94vw;
+    max-height: 78vh;
+    padding: 16px;
+    border-radius: 16px;
+}
+.movie-episodes-title { margin-bottom: 12px; font-size: 20px; }
+.movie-episodes-list { max-height: 58vh; }
+.movie-episode-button {
+    flex: 0 0 calc(25% - 10px);
+    min-height: 46px;
+    margin: 5px;
+    padding: 12px 6px;
+    border-radius: 8px;
+    font-size: 15px;
+}
+.movie-episodes-help { margin-top: 12px; font-size: 12px; }
+
+/* ---------- Player ---------- */
+.movie-player-title { max-width: 92vw; font-size: 20px; }
+.movie-player-status { margin-top: 4px; font-size: 14px; }
+.movie-subtitle-text {
+    left: 5%;
+    right: 5%;
+    bottom: 58px;
+    font-size: 21px;
+    line-height: 1.25;
+}
+
+/* ---------- Timeline tua ---------- */
+.movie-seek-timeline {
+    left: 14px;
+    right: 14px;
+    bottom: 18px;
+    padding: 12px 14px 14px;
+    border-radius: 12px;
+}
+.movie-seek-timeline-times { margin-bottom: 8px; font-size: 15px; }
+.movie-seek-timeline-track { height: 10px; }
+.movie-seek-timeline-thumb { width: 20px; height: 20px; margin-left: -10px; margin-top: -10px; }
+
+/* ---------- Menu phu de trong player ---------- */
+.movie-subtitle-dialog {
+    width: 94vw;
+    max-width: 420px;
+    max-height: 78vh;
+    padding: 16px;
+    border-radius: 14px;
+}
+.movie-subtitle-title { margin-bottom: 12px; font-size: 20px; }
+.movie-subtitle-status { min-height: 20px; margin: -6px 0 12px; font-size: 13px; }
+.movie-subtitle-list { max-height: 52vh; }
+.movie-subtitle-option {
+    min-height: 44px;
+    margin: 6px 0;
+    padding: 12px 14px;
+    border-radius: 8px;
+    font-size: 15px;
+}
+.movie-subtitle-option:active {
+    border-color: #fff;
+    background: #fff;
+    color: #111;
+}
+
+/* ---------- Menu danh sach tap trong player ---------- */
+.movie-player-episodes { padding: 0 3vw 4vh; }
+.movie-player-episodes-dialog {
+    max-height: 250px;
+    padding: 14px 16px;
+    border-radius: 14px;
+}
+.movie-player-episodes-title { margin-bottom: 10px; font-size: 17px; }
+.movie-player-episode-option {
+    flex: 0 0 104px;
+    min-width: 104px;
+    height: 46px;
+    padding: 12px 6px;
+    border-radius: 8px;
+    font-size: 14px;
+}
+
+/* ---------- Dialog thoat ---------- */
+#bintv-exit-modal .bintv-exit-dialog {
+    width: 92vw;
+    max-width: 420px;
+    padding: 24px 20px 20px;
+}
+#bintv-exit-modal .bintv-exit-title { margin-bottom: 10px; font-size: 24px; }
+#bintv-exit-modal .bintv-exit-message { margin: 0 auto 20px; font-size: 15px; }
+#bintv-exit-modal .bintv-exit-actions { gap: 12px; }
+#bintv-exit-modal .bintv-exit-button {
+    flex: 0 0 42%;
+    width: 42%;
+    height: 52px;
+    border-radius: 11px;
+    font-size: 17px;
+}
+
+/* ---------- Toast ---------- */
+#bintv-toast {
+    left: 50%;
+    bottom: 66px;
+    max-width: 88vw;
+    padding: 10px 16px;
+    border-radius: 8px;
+    font-size: 13px;
+}
+
+/* ---------- Landscape dien thoai: 4 the/hang, poster 16:9 (the thap) ---------- */
+@media (orientation: landscape) and (max-width: 1000px) {
+    .movie-card { flex: 0 0 calc(25% - 14px); }
+    .movie-card-poster { aspect-ratio: 16 / 9; }
+    .movie-card::after { height: 52px; }
+    .movie-card-name { bottom: 22px; font-size: 12px; }
+    .movie-catalogs { flex: 0 0 128px; width: 128px; }
+    .movie-catalog-row { padding: 8px 10px; font-size: 13px; }
+}

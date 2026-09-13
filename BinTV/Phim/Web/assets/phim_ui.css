@@ -1,0 +1,55 @@
+/* =====================================================
+   PHIM - PLAYER HUD (Android v1.2.1)
+   - Tu AN overlay (ten phim + trang thai "Dang phat") khi dang phat;
+     hien lai khi tam dung / dang tai / nguoi dung tuong tac.
+   - Khi HUD hien: timeline nhan duoc cham (keo de tua tren dien thoai).
+   - Nut tam dung giua man hinh (chi tao tren dien thoai boi
+     phim_player_ui.js).
+   ===================================================== */
+
+#bintv-movie-player .movie-player-overlay {
+    transition: opacity .25s ease, visibility 0s linear 0s;
+}
+#bintv-movie-player.phim-hud-hidden .movie-player-overlay {
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity .25s ease, visibility 0s linear .25s;
+}
+
+/* Khi HUD hien: cho phep cham vao timeline (ban goc pointer-events:none) */
+#bintv-movie-player:not(.phim-hud-hidden) .movie-seek-timeline {
+    pointer-events: auto;
+}
+
+/* Nut tam dung / tiep tuc giua man hinh (dien thoai) */
+#phim-phone-pause {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 15;
+    width: 88px;
+    height: 88px;
+    border: 3px solid rgba(255, 255, 255, .78);
+    border-radius: 50%;
+    background: rgba(10, 10, 14, .62);
+    color: #fff;
+    font-family: Arial, sans-serif;
+    font-size: 38px;
+    line-height: 1;
+    outline: none;
+    padding: 0;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity .2s ease, visibility 0s linear .2s, transform .12s ease;
+}
+#bintv-movie-player:not(.phim-hud-hidden) #phim-phone-pause {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transition: opacity .2s ease, visibility 0s linear 0s, transform .12s ease;
+}
+#phim-phone-pause:active {
+    transform: translate(-50%, -50%) scale(.92);
+}
