@@ -1,5 +1,11 @@
 # BinTV iOS — TrollStore Build (FIXED)
 
+> **Bản mới nhất: 2.5.1 (build 231)** — PHIM phát bằng TRÌNH PHÁT GỐC iOS
+> (AVPlayer): hết lỗi "Không thể phát trên TV" với nguồn MKV/AC3/EAC3/DTS.
+> Chi tiết: mục `### Build 231 (2.5.1)` ở cuối file · Cách lấy file: artifact
+> `BinTV-trollstore-unsigned` (chứa `BinTV.ipa`) của workflow
+> "Build unsigned IPA (TrollStore)".
+
 ## Build by GitHub Actions
 
 1. Upload this repository to GitHub
@@ -38,14 +44,6 @@ Nếu build thất bại:
   tìm `.app` thật bằng `find`, tạo `BinTV.ipa`, kiểm tra IPA sâu
   (Payload/*.app, Info.plist, executable +x, Mach-O arm64/arm64e iOS,
   không có file `._`), upload IPA + build log artifact.
-
-## Install with TrollStore
-
-1. Transfer `BinTV.ipa` to your iPhone
-2. Open TrollStore
-3. Tap `BinTV.ipa`
-4. Install → Done
-5. Open BinTV from home screen
 
 ## Install with TrollStore
 
