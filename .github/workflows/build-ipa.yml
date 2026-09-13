@@ -1,0 +1,1119 @@
+name: Build unsigned IPA (TrollStore)
+
+# ==============================================================================
+# Build file .ipa KHONG ky (unsigned), cau truc chuan TrollStore:
+#       Payload/BinTV.app
+# Runner macOS that cua GitHub. Khong can Apple ID / certificate / profile.
+#
+# DIEM DA SUA (ban FIXED):
+#   * xcodebuild ... 2>&1 | tee log  +  "set -o pipefail"  +  RC=${PIPESTATUS[0]}
+#     -> tee KHONG the che exit code cua xcodebuild nua (loi co ban truoc).
+#   * Mac dinh run_mode = "archive" -> tao duoc .xcthat, moi lan build deu kiem
+#     tra .xcarchive (thuc te ton tai + co Info.plist) TRUOC khi dong goi IPA.
+#   * Tim .app THAT SU de tao ra bang "find" (khong hard-code duong dan).
+#   * IPA dat ten theo ten that cua .app -> BinTV.ipa.
+#   * Kiem tra IPA sau khi tao ngay tren file zip: Payload/<App>.app,
+#     Info.plist hop le, CFBundleIdentifier, executable ton tai + co quyen
+#     thuc thi + la Mach-O iOS arm64/arm64e, khong co file ._ thua.
+#   * Job summary in 15 dong 'error:' ra trang Summary; artifact build log
+#     LUON duoc tai len (if: always()) de xem ngay ca khi build that bai.
+#
+# [2026-09-12] xbuild.log — NHAT KY HOP NHAT TOAN PIPELINE:
+#   * Buoc "Init xbuild.log" chay NGAY sau checkout -> file log ton tai tu dau;
+#     KE CA khi Detect/Preflight fail som (truoc khi kip chay xcodebuild) van
+#     co artifact 'xbuild-log' tai ve duoc (truoc day log chi sinh ra o buoc
+#     Build nen fail som = KHONG co log de chan benh).
+#   * Moi step chinh ghi log bang wrapper bash 3.2-safe:
+#         { ...body... } 2>&1 | tee -a "$XLOG"
+#         RC_STEP="${PIPESTATUS[0]}";  exit "$RC_STEP"
+#     -> console Actions van hien day du, file log nhan ban sao y het,
+#        exit code that cua tung step duoc giu nguyen (KHONG che loi).
+#   * Xcodebuild khong con tee rieng: output chay thang vao stdout cua step
+#     (da duoc tee -a vao xbuild.log) -> RC=$? truc tiep, don gian va chac hon.
+#   * Cuoi moi step co marker "======== [STEP END] <ten> exit=N ========" de
+#     mo file ra la biet ngay step nao chet, ma khong can doc het 5 nghin dong.
+#   * [FIX lan 2, tu xbuild.log that cua run 34690803983] GitHub chay step
+#     'shell: bash' bang `bash --noprofile --norc -eo pipefail` -> khi step
+#     FAIL, -e abort ngay sau pipeline tee, marker [STEP END] khong duoc ghi.
+#     Da them `set +e` truoc pipeline cua ca 8 step wrapper (exit code that
+#     van duoc tra lai qua exit "$RC_STEP") va set +e/-e quanh xcodebuild.
+#   * File .swift KHAI TU (BrowserTabs/BrowserTabBar/NewTabPageView) duoc thay
+#     bang TOMBSTONE chi-chua-comment voi marker '// ci-skip:' — co che loai
+#     tru CO CHU DICH, in minh bach ra log, cua chinh Preflight (CACH SUA 3).
+#   * [2026-09-12] Input 'runner': macos-15 (mac dinh, y het cu) hoac
+#     'self-hosted' — dung khi tai khoan GitHub bi chan billing (het phut
+#     macOS/private repo): dang ky runner tren Mac ca nhan (co Xcode) va
+#     chay workflow_dispatch voi runner=self-hosted. Khong doi gi khac.
+# Tuong thich bash 3.2 (macOS mac dinh): khong mapfile / globstar / declare -A.
+# ==============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      xcode_version:
+        description: "Phien ban Xcode (vd 16.2, 16.4). default = mac dinh cua runner"
+        required: false
+        default: default
+        type: choice
+        options:
+          - default
+          - "16.2"
+          - "16.3"
+          - "16.4"
+      configuration:
+        description: "Build configuration"
+        required: false
+        default: Release
+        type: choice
+        options:
+          - Release
+          - Debug
+      archs:
+        description: "ARCHS - arm64e toi uu cho iPhone A12+ (iOS 16.5 + TrollStore)"
+        required: false
+        default: default
+        type: choice
+        options:
+          - default
+          - arm64
+          - arm64e
+          - arm64 arm64e
+      bundle_id:
+        description: "Bundle ID (auto = tu doc Info.plist cua target)"
+        required: false
+        default: auto
+        type: string
+      run_mode:
+        description: "archive = xcodebuild archive (mac dinh, tao .xcarchive + IPA)"
+        required: false
+        default: archive
+        type: choice
+        options:
+          - archive
+          - build
+      runner:
+        description: "Runner: macos-15 (GitHub host, ton phút Actions) hoac self-hosted (Mac cua ban, MIEN PHI phut GitHub)"
+        required: false
+        default: macos-15
+        type: choice
+        options:
+          - macos-15
+          - self-hosted
+
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build IPA
+    # [2026-09-12] Chon runner duoc: macos-15 (GitHub host) hoac self-hosted
+    # (Mac ca nhan — khong ton phut Actions, thoat chan billing cua tai khoan).
+    # Push/tag event khong co inputs -> || 'macos-15' giu hanh vi cu nguyen ven.
+    runs-on: ${{ inputs.runner || 'macos-15' }}
+    timeout-minutes: 60
+
+    env:
+      RUNNER: ${{ inputs.runner || 'macos-15' }}
+      BUILD_DIR: build/Output    # DerivedData + xbuild.log + .xcarchive + IPA nam trong repo
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      # ------------------------------------------------------------------------
+      # (0) INIT xbuild.log — tao file log NGAY sau checkout de moi buoc sau
+      #     deu co cho append. Dam bao artifact 'xbuild-log' LUON ton tai,
+      #     ke ca khi Detect/Preflight fail som (nguyen nhan pho bien nhat
+      #     khien nguoi dung "khong co log de xem loi").
+      # ------------------------------------------------------------------------
+      - name: Init xbuild.log
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT_DIR="$GITHUB_WORKSPACE/$BUILD_DIR"
+          mkdir -p "$OUT_DIR"
+          XLOG="$OUT_DIR/xbuild.log"
+          rm -f "$XLOG"
+          {
+            echo "############################################################"
+            echo "# BinTV — xbuild.log : nhat ky build hop nhat toan pipeline"
+            echo "############################################################"
+            echo "time (UTC)   : $(date -u '+%Y-%m-%d %H:%M:%S')"
+            echo "run          : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo "ref / sha    : ${{ github.ref }} @ ${{ github.sha }}"
+            echo "event        : ${{ github.event_name }}"
+            echo "runner       : ${RUNNER:-?} / $(uname -m) / $(sw_vers -productName 2>/dev/null || echo '?') $(sw_vers -productVersion 2>/dev/null || echo '')"
+            echo "inputs       : xcode_version='${{ inputs.xcode_version }}' configuration='${{ inputs.configuration }}' archs='${{ inputs.archs }}' bundle_id='${{ inputs.bundle_id }}' run_mode='${{ inputs.run_mode }}'"
+            echo "BUILD_DIR    : $BUILD_DIR"
+            echo "XLOG         : $XLOG"
+            echo
+          } >> "$XLOG"
+          echo "==> xbuild.log da khoi tao: $XLOG"
+          cat "$XLOG"
+
+      # ------------------------------------------------------------------------
+      # (1) TU DONG NHAN DIEN CAU TRUC DU AN
+      #     co Podfile -> .xcworkspace (CocoaPods); con lai -> .xcodeproj
+      #     scheme = scheme da Shared trong xcshareddata, nguon lai = ten project
+      # ------------------------------------------------------------------------
+      - name: Detect Xcode project
+        id: detect
+        shell: bash
+        run: |
+          XLOG="$GITHUB_WORKSPACE/$BUILD_DIR/xbuild.log"
+          # [FIX 2026-09-12 lan 2] GitHub goi 'shell: bash' = `bash -eo pipefail`:
+          # pipeline {…}|tee fail se ABORT script TRUOC khi kip ghi marker
+          # [STEP END] (xac nhan tu xbuild.log that cua run 34690803983). set +e
+          # de wrapper chay het; exit "$RC_STEP" van giu NGUYEN exit code that.
+          set +e
+          {
+          echo "======== [STEP] Detect Xcode project ========"
+          set -euo pipefail
+
+          PROJECTS=$(find . \
+            \( -type d \( -name .git -o -name Pods -o -name build -o -name DerivedData -o -name node_modules \) -prune \) -o \
+            -type d -name '*.xcodeproj' -print 2>/dev/null | sed 's|^\./||' | sort) || true
+
+          WORKSPACES=$(find . \
+            \( -type d \( -name .git -o -name build -o -name DerivedData -o -name node_modules \) -prune \) -o \
+            -type d -name '*.xcworkspace' -not -path '*.xcodeproj/*' -print 2>/dev/null | sed 's|^\./||' | sort) || true
+
+          count_lines() {
+            if [ -z "$1" ]; then echo 0; else printf '%s\n' "$1" | grep -c .; fi
+          }
+          N_PROJ=$(count_lines "$PROJECTS")
+          N_WS=$(count_lines "$WORKSPACES")
+
+          echo "==> .xcodeproj   ($N_PROJ):"
+          while IFS= read -r l; do
+            [ -n "$l" ] && echo "    $l"
+          done <<LIST_PROJ
+          $PROJECTS
+          LIST_PROJ
+          [ "$N_PROJ" -gt 0 ] || echo "    (khong co)"
+          echo "==> .xcworkspace ($N_WS):"
+          while IFS= read -r l; do
+            [ -n "$l" ] && echo "    $l"
+          done <<LIST_WS
+          $WORKSPACES
+          LIST_WS
+          [ "$N_WS" -gt 0 ] || echo "    (khong co)"
+
+          USE_WS="auto"
+          if [ "$N_WS" -gt 0 ] && [ -f Podfile ]; then
+            USE_WS=workspace
+          else
+            USE_WS=project
+          fi
+
+          if [ "$USE_WS" = "workspace" ]; then
+            if [ "$N_WS" -lt 1 ]; then
+              echo "::error::Khong tim thay .xcworkspace nao"
+              exit 1
+            fi
+            PROJ=$(printf '%s\n' "$WORKSPACES" | head -n1)
+            FLAG="-workspace"
+          else
+            if [ "$N_PROJ" -lt 1 ]; then
+              echo "::error::Khong tim thay .xcodeproj nao trong repo."
+              echo "::error::Kiem tra .xcodeproj/project.pbxproj da duoc commit chua (xem .gitignore)."
+              exit 1
+            fi
+            PROJ=$(printf '%s\n' "$PROJECTS" | head -n1)
+            FLAG="-project"
+            if [ "$N_PROJ" -gt 1 ]; then
+              echo "::warning::Tim thay $N_PROJ project, dung cai dau tien: $PROJ"
+            fi
+          fi
+
+          BASE=$(basename "$PROJ")
+          DEFAULT_SCHEME="${BASE%%.*}"
+          SCHEME="$DEFAULT_SCHEME"
+
+          SHARED_DIR="$PROJ/xcshareddata/xcschemes"
+          if [ -d "$SHARED_DIR" ]; then
+            SHARED_LIST=$(find "$SHARED_DIR" -maxdepth 1 -type f -name '*.xcscheme' \
+              -exec basename {} .xcscheme \; | sort) || true
+            if [ -n "$SHARED_LIST" ]; then
+              echo "==> Shared schemes: $(printf '%s\n' "$SHARED_LIST" | tr '\n' ' ')"
+              if printf '%s\n' "$SHARED_LIST" | grep -qx "$DEFAULT_SCHEME"; then
+                SCHEME="$DEFAULT_SCHEME"
+              else
+                SCHEME=$(printf '%s\n' "$SHARED_LIST" | head -n1)
+              fi
+            fi
+          fi
+
+          echo "==> Dung: $FLAG '$PROJ' -scheme '$SCHEME'"
+          {
+            echo "project_path=$PROJ"
+            echo "project_flag=$FLAG"
+            echo "scheme=$SCHEME"
+            echo "project_dir=$(dirname "$PROJ")"
+          } >> "$GITHUB_OUTPUT"
+          } 2>&1 | tee -a "$XLOG"
+          RC_STEP="${PIPESTATUS[0]}"
+          echo "======== [STEP END] Detect Xcode project exit=$RC_STEP ========" | tee -a "$XLOG"
+          exit "$RC_STEP"
+
+      # ------------------------------------------------------------------------
+      # (2) PREFLIGHT: kiem tra pbxproj + scheme TRUOC khi build (tiet kiem ~5 phut)
+      #     - file .swift nam ngoai Compile Sources  -> "cannot find in scope"
+      #     - Compile Sources tro toi file KHONG con tren dia (check 2 chieu,
+      #       them 2026-09-12)                       -> "Build input file cannot be found"
+      #     - UUID ho / duong dan ao trong pbxproj   -> project.pbxproj bi hong
+      #     - scheme cham target khong ton tai       -> xcodebuild loi ngay buoc dau
+      #     - doc Info.plist cua target de lay bundle ID that
+      #     Toan bo output cua Preflight cung duoc ghi vao xbuild.log.
+      # ------------------------------------------------------------------------
+      - name: Preflight (pbxproj + scheme vs source files)
+        id: preflight
+        shell: bash
+        run: |
+          XLOG="$GITHUB_WORKSPACE/$BUILD_DIR/xbuild.log"
+          # [FIX 2026-09-12 lan 2] GitHub goi 'shell: bash' = `bash -eo pipefail`:
+          # pipeline {…}|tee fail se ABORT script TRUOC khi kip ghi marker
+          # [STEP END] (xac nhan tu xbuild.log that cua run 34690803983). set +e
+          # de wrapper chay het; exit "$RC_STEP" van giu NGUYEN exit code that.
+          set +e
+          {
+          echo "======== [STEP] Preflight (pbxproj + scheme vs source files) ========"
+          set -uo pipefail
+          python3 - "$GITHUB_WORKSPACE" "${{ steps.detect.outputs.project_path }}" "${{ inputs.bundle_id }}" <<'PY'
+          import os, re, sys
+
+          root, proj_path = sys.argv[1], sys.argv[2]
+          proj_path = proj_path if os.path.isabs(proj_path) else os.path.join(root, proj_path)
+          pbx = os.path.join(os.path.abspath(proj_path), "project.pbxproj")
+          rc = 0
+
+          if not os.path.isfile(pbx):
+              print("::error::Khong tim thay %s" % pbx)
+              sys.exit(1)
+
+          text = open(pbx, encoding="utf-8", errors="replace").read()
+
+          # --- 2.1 Compile Sources ---
+          in_sources = set()
+          pat = re.compile(r"Begin PBXSourcesBuildPhase section \*/(.*?)"
+                           r"End PBXSourcesBuildPhase section", re.S)
+          blocks = pat.findall(text) or ([text] if "PBXSourcesBuildPhase" in text else [])
+          for block in blocks:
+              for lst in re.findall(r"files\s*=\s*\((.*?)\);", block, re.S):
+                  for m in re.finditer(r"/\*\s*(.+?)\s+in Sources\s*\*/", lst):
+                      in_sources.add(os.path.basename(m.group(1).strip()))
+
+          SKIP = {".git", "Pods", "build", "DerivedData", "node_modules", ".build", "Scripts"}
+          EXT = (".swift", ".m", ".mm", ".c", ".cpp")
+          on_disk = []
+          for dirpath, dirnames, filenames in os.walk(root):
+              dirnames[:] = [d for d in dirnames if d not in SKIP]
+              for f in filenames:
+                  if f.endswith(EXT):
+                      on_disk.append(os.path.relpath(os.path.join(dirpath, f), root))
+
+          def skip_reason(rel):
+              """File co '// ci-skip:' trong 6 dong dau -> duoc loai co chu dich."""
+              try:
+                  with open(os.path.join(root, rel), encoding="utf-8", errors="replace") as fh:
+                      for i, line in enumerate(fh):
+                          if i > 5:
+                              break
+                          if "ci-skip:" in line:
+                              return line.strip()
+              except OSError:
+                  pass
+              return None
+
+          missing, skipped = [], {}
+          for p in sorted(on_disk):
+              if os.path.basename(p) in in_sources:
+                  continue
+              why = skip_reason(p)
+              if why:
+                  skipped[p] = why       # loai co chu dich -> KHONG phai loi
+              else:
+                  missing.append(p)
+
+          print("Compile Sources : %d entry | file nguon tren dia : %d"
+                % (len(in_sources), len(on_disk)))
+          for p, why in sorted(skipped.items()):
+              print("  - bo qua co chu dich: %s  (%s)" % (p, why))
+
+          if missing:
+              rc = 1
+              print("::error::%d file .swift/.m KHONG nam trong Compile Sources "
+                    "-> xcodebuild bao 'cannot find ... in scope' (exit 65):" % len(missing))
+              for p in missing:
+                  print("   - %s" % p)
+              # [PREFLIGHT FIX 2026-09-12] In cach sua truc tiep vao log de nguoi
+              # dung xu ly dung huong (KHONG tu bo qua loi — rc van = 1).
+              print("   CACH SUA (chon 1):")
+              print("   (1) File da KHAI TU (vd BrowserTabBar/NewTabPageView cua build 218)"
+                    " -> XOA khoi repo: GitHub UI mo file -> bieu tuong thung rac -> Commit changes;")
+              print("   (2) File con dung -> upload project.pbxproj ban dung de dang ky"
+                    " vao Compile Sources (PBXBuildFile + PBXFileReference + group + Sources phase);")
+              print("   (3) Chu dich khong bien dich -> them '// ci-skip: ly do' trong 6 dong dau file.")
+
+          # --- 2.1b HUONG NGUOC LAI: Compile Sources tham chieu file KHONG ton tai tren dia ---
+          # [PREFLIGHT FIX 2026-09-12] Bit blind spot: nguoi dung DA xoa file khai tu tren
+          # repo nhung CHUA upload pbxproj moi -> check 2.1 (dia -> Sources) van PASS,
+          # xcodebuild moi chet 'Build input file cannot be found' sau ~5 phut chon Xcode.
+          # Preflight phai bat ngay tai day (Sources -> dia), cung dung heuristic basename
+          # nhu check 2.1. Loi nay KHONG duoc phep bo qua — rc = 1 that.
+          disk_names = {os.path.basename(p) for p in on_disk}
+          ghosts = sorted(n for n in in_sources if n not in disk_names)
+          if ghosts:
+              rc = 1
+              print("::error::%d file nam trong Compile Sources NHUNG KHONG ton tai tren dia "
+                    "-> xcodebuild bao 'Build input file cannot be found':" % len(ghosts))
+              for g in ghosts:
+                  print("   - %s" % g)
+              print("   CACH SUA: upload du file nguon con thieu, HOAC upload project.pbxproj"
+                    " ban dung (da bo tham chieu cac file khai tu).")
+
+          # --- 2.2 UUID ho ---
+          hexes = set(re.findall(r"\b[0-9A-F]{24,40}\b", text))
+          # dong dinh nghia co dang:  <UUID> [/* comment */] =  (du kiem tra co
+          # comment hay khong, de tranh false-positive voi pbxproj chuan)
+          defined = set(re.findall(
+              r"^[ \t]*([0-9A-F]{24,40})(?:[ \t]*/\*.*?\*/)?[ \t]*=", text, re.M))
+          dangling = sorted(h for h in hexes if h not in defined)[:12]
+          if dangling:
+              rc = 1
+              print("::error::%d UUID duoc tham chieu trong pbxproj nhung khong ton tai "
+                    "(project.pbxproj bi hong):" % len(dangling))
+              for d in dangling:
+                print("   - %s" % d)
+
+          # --- 2.3 Scheme chi den BlueprintIdentifier hop le ---
+          shared_dir = os.path.join(os.path.abspath(proj_path), "xcshareddata", "xcschemes")
+          if os.path.isdir(shared_dir):
+              scheme_ids = set()
+              for sf in os.listdir(shared_dir):
+                  if sf.endswith(".xcscheme"):
+                      s = open(os.path.join(shared_dir, sf),
+                               encoding="utf-8", errors="replace").read()
+                      scheme_ids |= set(re.findall(r'BlueprintIdentifier = "([^"]+)"', s))
+              target_ids = set(re.findall(
+                  r"([0-9A-F]{24,40}) /\* .+ \*/ = \{\s*\n\s*isa = PBXNativeTarget", text))
+              bad = sorted(i for i in scheme_ids if i not in target_ids)
+              if bad:
+                  rc = 1
+                  print("::error::Scheme shared cham den BlueprintIdentifier KHONG HOP LE "
+                        "(xcodebuild -scheme se loi ngay buoc dau):")
+                  for b in bad:
+                      print("   - %s" % b)
+                  print("   Cac ID target hop le trong pbxproj: %s"
+                        % ", ".join(sorted(target_ids)))
+              elif scheme_ids:
+                  print("Scheme check  : OK (%d BlueprintIdentifier hop le)" % len(scheme_ids))
+          else:
+              print("::warning::Khong co shared scheme trong xcshareddata/xcschemes")
+
+          # --- 2.4 Bundle ID that, lay tu Info.plist ma target dang dung ---
+          def paths_for(key, pat):
+              got = []
+              for mm in re.finditer(pat, text):
+                  v = mm.group(1).strip()
+                  if v in ("NO", "YES", "") or not re.search(r"[/.]", v):
+                      continue
+                  got.append(v)
+              return got
+
+          plist_v = (paths_for("INFOPLIST_FILE", r'INFOPLIST_FILE\s*=\s*"([^"]+)"\s*;')
+                     or paths_for("INFOPLIST_FILE", r'INFOPLIST_FILE\s*=\s*([A-Za-z0-9_./+-]+)\s*;'))
+          bid_v = (paths_for("PRODUCT_BUNDLE_IDENTIFIER",
+                             r'PRODUCT_BUNDLE_IDENTIFIER\s*=\s*"([^"]+)"\s*;')
+                   or paths_for("PRODUCT_BUNDLE_IDENTIFIER",
+                                r'PRODUCT_BUNDLE_IDENTIFIER\s*=\s*([A-Za-z0-9_${}/.+-]+)\s*;'))
+          plist_str = plist_v[0] if plist_v else "<khong dat>"
+          bid_str = bid_v[0] if bid_v else "<khong dat>"
+
+          bid = ""
+          if plist_v:
+              ip = os.path.normpath(os.path.join(root, plist_v[0]))
+              if os.path.isfile(ip):
+                  try:
+                      import plistlib
+                      with open(ip, "rb") as fh:
+                          bid = str(plistlib.load(fh).get("CFBundleIdentifier", "") or "")
+                  except Exception as e:
+                      print("::warning::khong doc duoc %s (%s)" % (ip, e))
+              else:
+                  print("::warning::INFOPLIST_FILE tro toi %s nhung file khong ton tai" % ip)
+
+          print("INFOPLIST_FILE : %s" % plist_str)
+          print("Info.plist BID : %s" % (bid or "<khong doc duoc>"))
+          print("pbxproj BID    : %s" % bid_str)
+
+          want = sys.argv[3] if len(sys.argv) > 3 else "auto"
+          final_bid = "" if want == "auto" else want
+          if not final_bid:
+              for cand in (bid, bid_str):
+                  # chi lay gia tri tinh; bo sentinel "<...>", bo $(...) (xcodebuild tu giai)
+                  if cand and "$(" not in cand and not cand.startswith("<"):
+                      final_bid = cand
+                      break
+          if final_bid:
+              print("==> bundle_id dung cho build: %s" % final_bid)
+          else:
+              rc = rc or 1
+              print("::error::Khong lay duoc bundle ID tinh. TrollStore tu chu .app co "
+                    "CFBundleIdentifier trong -> dat PRODUCT_BUNDLE_IDENTIFIER trong "
+                    "target, hoac nhap bundle_id khi chay workflow.")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("bundle_id=%s\n" % final_bid)
+              fh.write("missing_sources=%d\n" % len(missing))
+              fh.write("ghost_sources=%d\n" % len(ghosts))
+          sys.exit(rc)
+          PY
+          } 2>&1 | tee -a "$XLOG"
+          RC_STEP="${PIPESTATUS[0]}"
+          echo "======== [STEP END] Preflight exit=$RC_STEP ========" | tee -a "$XLOG"
+          exit "$RC_STEP"
+
+      # ------------------------------------------------------------------------
+      # (3) CHON VERSION XCODE qua DEVELOPER_DIR - khong sudo
+      # ------------------------------------------------------------------------
+      - name: Select Xcode
+        if: ${{ inputs.xcode_version != 'default' }}
+        shell: bash
+        run: |
+          XLOG="$GITHUB_WORKSPACE/$BUILD_DIR/xbuild.log"
+          # [FIX 2026-09-12 lan 2] GitHub goi 'shell: bash' = `bash -eo pipefail`:
+          # pipeline {…}|tee fail se ABORT script TRUOC khi kip ghi marker
+          # [STEP END] (xac nhan tu xbuild.log that cua run 34690803983). set +e
+          # de wrapper chay het; exit "$RC_STEP" van giu NGUYEN exit code that.
+          set +e
+          {
+          echo "======== [STEP] Select Xcode ========"
+          set -euo pipefail
+          V="${{ inputs.xcode_version }}"
+          for CAND in "/Applications/Xcode_${V}.app" "/Applications/Xcode_${V}.0.app"; do
+            if [ -d "$CAND" ]; then
+              echo "DEVELOPER_DIR=$CAND/Contents/Developer" >> "$GITHUB_ENV"
+              echo "==> Pin Xcode: $CAND"
+              exit 0
+            fi
+          done
+          echo "::error::Khong tim thay Xcode '$V'. Cac phien ban co tren runner:"
+          for d in /Applications/Xcode*.app; do
+            [ -d "$d" ] && echo "  $(basename "$d")"
+          done
+          exit 1
+          } 2>&1 | tee -a "$XLOG"
+          RC_STEP="${PIPESTATUS[0]}"
+          echo "======== [STEP END] Select Xcode exit=$RC_STEP ========" | tee -a "$XLOG"
+          exit "$RC_STEP"
+
+      - name: Toolchain info
+        shell: bash
+        run: |
+          XLOG="$GITHUB_WORKSPACE/$BUILD_DIR/xbuild.log"
+          # [FIX 2026-09-12 lan 2] GitHub goi 'shell: bash' = `bash -eo pipefail`:
+          # pipeline {…}|tee fail se ABORT script TRUOC khi kip ghi marker
+          # [STEP END] (xac nhan tu xbuild.log that cua run 34690803983). set +e
+          # de wrapper chay het; exit "$RC_STEP" van giu NGUYEN exit code that.
+          set +e
+          {
+          echo "======== [STEP] Toolchain info ========"
+          set -euo pipefail
+          echo "DEVELOPER_DIR = ${DEVELOPER_DIR:-<mac dinh cua runner>}"
+          xcodebuild -version
+          xcodebuild -showsdks 2>/dev/null | grep -i iphoneos || true
+          echo "host arch = $(uname -m)"
+          } 2>&1 | tee -a "$XLOG"
+          RC_STEP="${PIPESTATUS[0]}"
+          echo "======== [STEP END] Toolchain info exit=$RC_STEP ========" | tee -a "$XLOG"
+          exit "$RC_STEP"
+
+      # ------------------------------------------------------------------------
+      # (4) BUILD (signing tat hoan toan)
+      #     Mac dinh = "archive": tao .xcarchive theo yeu cau (generic/platform=iOS).
+      #     Output xcodebuild chay thang vao stdout cua step -> wrapper tee -a
+      #     ghi vao xbuild.log; RC=$? truc tiep (khong pipe noi bo che exit code).
+      #     LUU Y: KHONG xoa xbuild.log o day (log hop nhat da khoi tao tu buoc
+      #     Init va chua lich su Detect/Preflight — chi xoa .xcarchive cu).
+      # ------------------------------------------------------------------------
+      - name: Build .app (signing disabled)
+        shell: bash
+        run: |
+          XLOG="$GITHUB_WORKSPACE/$BUILD_DIR/xbuild.log"
+          # [FIX 2026-09-12 lan 2] GitHub goi 'shell: bash' = `bash -eo pipefail`:
+          # pipeline {…}|tee fail se ABORT script TRUOC khi kip ghi marker
+          # [STEP END] (xac nhan tu xbuild.log that cua run 34690803983). set +e
+          # de wrapper chay het; exit "$RC_STEP" van giu NGUYEN exit code that.
+          set +e
+          {
+          echo "======== [STEP] Build .app (signing disabled) ========"
+          set -euo pipefail
+
+          OUT_DIR="$GITHUB_WORKSPACE/$BUILD_DIR"
+          mkdir -p "$OUT_DIR"
+          DERIVED="$OUT_DIR/DerivedData"
+          SCHEME="${{ steps.detect.outputs.scheme }}"
+          ARCHIVE_PATH="$OUT_DIR/$SCHEME.xcarchive"
+          rm -rf "$ARCHIVE_PATH"
+
+          ARGS=(
+            "${{ steps.detect.outputs.project_flag }}" "${{ steps.detect.outputs.project_path }}"
+            -scheme "$SCHEME"
+            -configuration "${{ inputs.configuration }}"
+            -derivedDataPath "$DERIVED"
+            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_REQUIRED=NO
+            CODE_SIGN_IDENTITY=
+            EXPANDED_CODE_SIGN_IDENTITY=
+            CODE_SIGN_STYLE=Manual
+            PROVISIONING_PROFILE_SPECIFIER=
+            DEVELOPMENT_TEAM=
+            ENABLE_USER_SCRIPT_SANDBOXING=NO
+            COMPILER_INDEX_STORE_ENABLE=NO
+            ONLY_ACTIVE_ARCH=NO
+          )
+
+          BID="${{ steps.preflight.outputs.bundle_id }}"
+          if [ -n "$BID" ]; then
+            ARGS+=( "PRODUCT_BUNDLE_IDENTIFIER=$BID" )
+          fi
+
+          ARCHS_IN="${{ inputs.archs }}"
+          if [ -n "$ARCHS_IN" ] && [ "$ARCHS_IN" != "default" ]; then
+            ARGS+=( "ARCHS=$ARCHS_IN" "VALID_ARCHS=$ARCHS_IN" )
+          fi
+
+          MODE="${{ inputs.run_mode }}"
+          if [ "$MODE" = "archive" ]; then
+            ARGS+=( -destination generic/platform=iOS -archivePath "$ARCHIVE_PATH" archive )
+          else
+            ARGS+=( -sdk iphoneos build )
+          fi
+
+          echo "==> xcodebuild ${ARGS[*]}"
+
+          # ----- CHAY xcodebuild: exit code that lay truc tiep bang $? -----
+          # [FIX 2026-09-12 lan 2] -e (GitHub boi default, ke thua vao subshell
+          # wrapper) se abort TRUOC khi lay duoc RC neu xcodebuild fail -> mat
+          # error dump. set +e tam quanh lenh build (dung co che workflow ban
+          # goc), set -e lai ngay sau. RC van la exit code that — khong che loi.
+          set +e
+          xcodebuild "${ARGS[@]}" 2>&1
+          RC=$?
+          set -e
+          echo "==> xcodebuild exit code = $RC (65 = loi bien dich)"
+
+          # ----- Kiem tra .xcarchive (chi khi run_mode=archive) -----
+          if [ "$MODE" = "archive" ]; then
+            if [ ! -d "$ARCHIVE_PATH" ]; then
+              echo "::error::Khong co .xcarchive o '$ARCHIVE_PATH' (xcodebuild exit $RC)."
+              echo "===== cac dong 'error:' trong xbuild.log ====="
+              grep -n -E "error:|fatal error|cannot find|No such file|Build input file" "$XLOG" | tail -n 60 || true
+              echo "===== 40 dong cuoi ====="
+              tail -n 40 "$XLOG"
+              exit 1
+            fi
+            if [ ! -f "$ARCHIVE_PATH/Info.plist" ]; then
+              echo "::error::.xcarchive khong hop le (thieu Info.plist). Build bi dong."
+              tail -n 40 "$XLOG"
+              exit 1
+            fi
+            echo "==> .xcarchive OK: $ARCHIVE_PATH"
+            APP="$(find "$ARCHIVE_PATH/Products/Applications" -maxdepth 1 -type d -name '*.app' 2>/dev/null | head -n1)" || APP=""
+          else
+            APP="$(find "$DERIVED/Build/Products" -maxdepth 2 -type d -name '*.app' -path '*iphoneos*' 2>/dev/null | head -n1)" || APP=""
+          fi
+
+          # ----- Tim .app THAT SU (khong hard-code ten) -----
+          if [ -z "$APP" ] || [ ! -d "$APP" ]; then
+            echo "::error::Khong tim thay .app duoc tao ra (xcodebuild exit $RC)."
+            echo "===== cac dong 'error:' trong xbuild.log ====="
+            grep -n -E "error:|fatal error|cannot find|No such file|Build input file" "$XLOG" | tail -n 60 || true
+            echo "===== 40 dong cuoi ====="
+            tail -n 40 "$XLOG"
+            exit 1
+          fi
+
+          if [ "$RC" -ne 0 ]; then
+            echo "::error::xcodebuild ket thuc voi exit code $RC - build THAT BAI."
+            exit "$RC"
+          fi
+
+          echo "==> .app that su: $APP"
+          find "$APP" -maxdepth 1 -print | head -n 20
+          echo "APP_PATH=$APP" >> "$GITHUB_ENV"
+          } 2>&1 | tee -a "$XLOG"
+          RC_STEP="${PIPESTATUS[0]}"
+          echo "======== [STEP END] Build .app exit=$RC_STEP ========" | tee -a "$XLOG"
+          exit "$RC_STEP"
+
+      - name: Build log (chi in khi loi)
+        if: failure()
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Buoc nay chi in ra console (khong append nguoc vao xbuild.log de
+          # khoi trung lap) — noi dung lay tu chinh xbuild.log.
+          XLOG="$GITHUB_WORKSPACE/$BUILD_DIR/xbuild.log"
+          if [ -f "$XLOG" ]; then
+            echo "===== [xbuild.log] cac dong chua 'error:' (100 dong cuoi) ====="
+            grep -n -E "error:|fatal error|cannot find|No such file|Build input file" "$XLOG" | tail -n 100 || true
+            echo "===== [xbuild.log] 40 dong cuoi ====="
+            tail -n 40 "$XLOG"
+            echo "===== Tai file log day du: artifact 'xbuild-log' (build/Output/xbuild.log) ====="
+          else
+            echo "Khong tim thay $XLOG"
+          fi
+
+      # ------------------------------------------------------------------------
+      # (5) KIEM TRA .APP (Info.plist + Mach-O + quyen thuc thi)
+      # ------------------------------------------------------------------------
+      - name: Verify .app bundle
+        shell: bash
+        run: |
+          XLOG="$GITHUB_WORKSPACE/$BUILD_DIR/xbuild.log"
+          # [FIX 2026-09-12 lan 2] GitHub goi 'shell: bash' = `bash -eo pipefail`:
+          # pipeline {…}|tee fail se ABORT script TRUOC khi kip ghi marker
+          # [STEP END] (xac nhan tu xbuild.log that cua run 34690803983). set +e
+          # de wrapper chay het; exit "$RC_STEP" van giu NGUYEN exit code that.
+          set +e
+          {
+          echo "======== [STEP] Verify .app bundle ========"
+          set -euo pipefail
+          python3 - "$APP_PATH" <<'PY'
+          import os, plistlib, struct, sys
+
+          app = sys.argv[1]
+          plist = os.path.join(app, "Info.plist")
+          if not os.path.isfile(plist):
+              print("::error::Thieu Info.plist trong .app")
+              sys.exit(1)
+
+          with open(plist, "rb") as fh:
+              info = plistlib.load(fh)
+
+          bundle_id = str(info.get("CFBundleIdentifier", "") or "")
+          exe = str(info.get("CFBundleExecutable", "") or "")
+          print("CFBundleIdentifier = %s" % bundle_id)
+          print("CFBundleExecutable = %s" % exe)
+          print("MinimumOSVersion   = %s" % info.get("MinimumOSVersion",
+              info.get("CFBundleShortVersionString", "?")))
+
+          errs = []
+          if not bundle_id or "$" in bundle_id:
+              errs.append(
+                  "CFBundleIdentifier rong/chua duoc thay - TrollStore tu chu. "
+                  "Dat PRODUCT_BUNDLE_IDENTIFIER trong target va INFOPLIST_FILE tro "
+                  "toi Info.plist co CFBundleIdentifier."
+              )
+          if not exe:
+              errs.append("CFBundleExecutable rong trong Info.plist.")
+
+          CPU = {0x0100000C: "arm64", 0x0100000E: "arm64e",
+                 0x01000007: "x86_64", 0x00000007: "i386"}
+          # platform_t (load command LC_BUILD_VERSION): 1=MACOS 2=IOS 3=TVOS
+          # 4=WATCHOS 6=MACCATALYST 7=IOSSIMULATOR 8=TVSIMULATOR 9=WATCHSIMULATOR 11=VISIONOS
+          PLAT = {1: "MACOS", 2: "IOS", 3: "TVOS", 4: "WATCHOS", 6: "MACCATALYST",
+                  7: "IOSSIMULATOR", 8: "TVSIMULATOR", 9: "WATCHSIMULATOR", 11: "VISIONOS"}
+
+          def scan_macho(data, off, little, hdrsize=32):
+              e = "<" if little else ">"
+              ncmd = struct.unpack_from(e + "I", data, off + 16)[0]
+              p = off + hdrsize
+              plats = set()
+              for _ in range(min(ncmd, 4096)):
+                  try:
+                      cmd, size = struct.unpack_from(e + "II", data, p)
+                  except struct.error:
+                      break
+                  if cmd == 0x32:  # LC_BUILD_VERSION: cmd,cmdsize,platform,minos,sdk,ntools
+                      try:
+                          plat = struct.unpack_from(e + "III", data, p)[2]
+                          plats.add(PLAT.get(plat, "plat#%d" % plat))
+                      except (struct.error, IndexError):
+                          pass
+                  elif cmd == 0x28:  # LC_VERSION_MIN_IPHONEOS
+                      plats.add("IOS")
+                  if size <= 0:
+                      break
+                  p += size
+              return plats
+
+          slices, platforms = [], set()
+          binpath = os.path.join(app, exe) if exe else ""
+          if exe and not os.path.isfile(binpath):
+              errs.append("Khong tim thay binary: %s" % binpath)
+          elif exe:
+              if not os.access(binpath, os.X_OK):
+                  errs.append("Executable khong co quyen thuc thi: %s" % binpath)
+              data = open(binpath, "rb").read()
+              MAGIC = {
+                  b"\xcf\xfa\xed\xfe": ("thin", 64, "little"),
+                  b"\xfe\xed\xfa\xcf": ("thin", 64, "big"),
+                  b"\xce\xfa\xed\xfe": ("thin", 32, "little"),
+                  b"\xfe\xed\xfa\xce": ("thin", 32, "big"),
+                  b"\xca\xfe\xba\xbe": ("fat", 0, "big"),
+                  b"\xbe\xba\xfe\xca": ("fat", 0, "little"),
+              }
+              m4 = MAGIC.get(bytes(data[0:4]))
+              if m4 is None:
+                  errs.append("%s khong phai Mach-O (magic=%r)" % (binpath, bytes(data[0:4])))
+              else:
+                  kind, bits, endi = m4
+                  le = endi == "little"
+                  hdrsize = 32 if bits == 64 else 28
+                  if kind == "thin":
+                      ct = struct.unpack_from("<I" if le else ">I", data, 4)[0]
+                      slices.append(CPU.get(ct, "cpu#%s" % hex(ct)))
+                      platforms |= scan_macho(data, 0, le, hdrsize)
+                  else:
+                      n = struct.unpack_from("<I" if le else ">I", data, 4)[0]
+                      fmt = "<5I" if le else ">5I"
+                      for i in range(max(0, min(n, 16))):
+                          ct, _sub, coff, _size, _al = struct.unpack_from(fmt, data, 8 + 20 * i)
+                          slices.append(CPU.get(ct, "cpu#%s" % hex(ct)))
+                          sub = MAGIC.get(bytes(data[coff:coff + 4]))
+                          if sub and sub[0] == "thin":
+                              sub_le = sub[2] == "little"
+                              c2 = struct.unpack_from("<I" if sub_le else ">I", data, coff + 4)[0]
+                              slices.append(CPU.get(c2, "cpu#%s" % hex(c2)))
+                              platforms |= scan_macho(data, coff, sub_le,
+                                                      32 if sub[1] == 64 else 28)
+
+          print("slices       = %s" % (sorted(set(slices)) or "?"))
+          print("platform(s)  = %s" % (sorted(platforms) or "?"))
+          bad = sorted({s for s in slices if s in ("x86_64", "i386")})
+          if bad:
+              errs.append("Binary chua slice Intel %s -> TrollStore chi cai arm64/arm64e" % bad)
+          if platforms and "IOS" not in platforms:
+              if "IOSSIMULATOR" in platforms:
+                  errs.append("Day la ban SIMULATOR -> khong the cai len iPhone")
+              else:
+                  errs.append("Khong xac nhan platform iOS device: %s" % sorted(platforms))
+          if os.path.isdir(os.path.join(app, "_CodeSignature")):
+              print("::notice::.app co _CodeSignature (ad-hoc) - TrollStore van ok.")
+          else:
+              print("OK: .app khong ky (unsigned) - dung mong doi.")
+
+          for e in errs:
+              print("::error::" + e)
+          sys.exit(1 if errs else 0)
+          PY
+          } 2>&1 | tee -a "$XLOG"
+          RC_STEP="${PIPESTATUS[0]}"
+          echo "======== [STEP END] Verify .app bundle exit=$RC_STEP ========" | tee -a "$XLOG"
+          exit "$RC_STEP"
+
+      # ------------------------------------------------------------------------
+      # (6) DONG GOI IPA: Payload/<App>.app -> BinTV.ipa
+      #     khong thu muc cha thua, khong file ._ AppleDouble
+      # ------------------------------------------------------------------------
+      - name: Package .ipa
+        id: package
+        shell: bash
+        run: |
+          XLOG="$GITHUB_WORKSPACE/$BUILD_DIR/xbuild.log"
+          # [FIX 2026-09-12 lan 2] GitHub goi 'shell: bash' = `bash -eo pipefail`:
+          # pipeline {…}|tee fail se ABORT script TRUOC khi kip ghi marker
+          # [STEP END] (xac nhan tu xbuild.log that cua run 34690803983). set +e
+          # de wrapper chay het; exit "$RC_STEP" van giu NGUYEN exit code that.
+          set +e
+          {
+          echo "======== [STEP] Package .ipa ========"
+          set -euo pipefail
+
+          APP="$APP_PATH"
+          APP_NAME=$(basename "$APP" .app)
+
+          STAGE="$GITHUB_WORKSPACE/$BUILD_DIR/ipa-root"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE/Payload"
+          cp -pR "$APP" "$STAGE/Payload/"
+
+          # loai AppleDouble / rac ru ca (neu co) truoc khi zip
+          find "$STAGE" -name '._*' -delete
+          find "$STAGE" -name '.DS_Store' -delete
+
+          IPA="$GITHUB_WORKSPACE/$BUILD_DIR/$APP_NAME.ipa"
+          rm -f "$IPA"
+
+          # -X loai ._ AppleDouble; -y giu symlink; chay tu goc staging de
+          # Payload/ nam ngay trong zip (khong bi them thu muc cha).
+          ( cd "$STAGE" && /usr/bin/zip -r -X -y -q "$IPA" "Payload" )
+
+          # ---- kiem tra IPA ngay tren file zip ----
+          if ! /usr/bin/unzip -tq "$IPA" >/dev/null; then
+            echo "::error::$APP_NAME.ipa bi hong (unzip -t that bai)."
+            exit 1
+          fi
+
+          echo "==> Cau truc ben trong $APP_NAME.ipa:"
+          unzip -l "$IPA" | sed -n '1,25p'
+
+          if ! unzip -Z1 "$IPA" | grep -q "^Payload/${APP_NAME}\.app/$"; then
+            echo "::error::IPA sai cau truc TrollStore: khong thay 'Payload/${APP_NAME}.app/' o goc zip."
+            exit 1
+          fi
+          if unzip -Z1 "$IPA" | grep -qE '(^|/)\._'; then
+            echo "::error::IPA chua file AppleDouble (._*) - kiem tra buoc build."
+            exit 1
+          fi
+
+          SIZE=$(du -h "$IPA" | cut -f1)
+          echo "IPA_PATH=$IPA" >> "$GITHUB_ENV"
+          echo "ipa=$IPA"         >> "$GITHUB_OUTPUT"
+          echo "app_name=$APP_NAME" >> "$GITHUB_OUTPUT"
+          echo "size=$SIZE"        >> "$GITHUB_OUTPUT"
+          ls -lh "$IPA"
+          shasum -a 256 "$IPA" 2>/dev/null || true
+          } 2>&1 | tee -a "$XLOG"
+          RC_STEP="${PIPESTATUS[0]}"
+          echo "======== [STEP END] Package .ipa exit=$RC_STEP ========" | tee -a "$XLOG"
+          exit "$RC_STEP"
+
+      # ------------------------------------------------------------------------
+      # (7) Kiem tra IPACHUA (deep check: Info.plist, executable, quyen, Mach-O)
+      #     doc TRUC TIEP tu file zip - khong uoc dot.
+      # ------------------------------------------------------------------------
+      - name: Verify .ipa
+        shell: bash
+        run: |
+          XLOG="$GITHUB_WORKSPACE/$BUILD_DIR/xbuild.log"
+          # [FIX 2026-09-12 lan 2] GitHub goi 'shell: bash' = `bash -eo pipefail`:
+          # pipeline {…}|tee fail se ABORT script TRUOC khi kip ghi marker
+          # [STEP END] (xac nhan tu xbuild.log that cua run 34690803983). set +e
+          # de wrapper chay het; exit "$RC_STEP" van giu NGUYEN exit code that.
+          set +e
+          {
+          echo "======== [STEP] Verify .ipa ========"
+          set -euo pipefail
+          python3 - "$IPA_PATH" <<'PY'
+          import os, plistlib, struct, sys, zipfile
+
+          ipa = sys.argv[1]
+          errs = []
+          z = zipfile.ZipFile(ipa)
+          names = z.namelist()
+
+          # 1) goc zip chi duoc chua Payload/
+          tops = sorted({n.split("/", 1)[0] for n in names})
+          if tops != ["Payload"]:
+              errs.append("Cac muc goc trong IPA phai la ['Payload'], thay vao do: %s" % tops)
+
+          # 2) dung mot .app duy nhat trong Payload/
+          apps = sorted({"/".join(n.split("/", 2)[:2]) for n in names
+                         if n.startswith("Payload/") and n.count("/") >= 2
+                         and n.split("/", 2)[1].endswith(".app")})
+          if len(apps) != 1:
+              errs.append("Phai co dung 1 .app trong Payload/, thay vao do: %s" % (apps or "(trong)"))
+          else:
+              app = apps[0]
+              short = app[:-4]
+
+              # 3) Info.plist hop le
+              ip = "%s/Info.plist" % app
+              if ip not in names:
+                  errs.append("Thieu %s trong IPA" % ip)
+              else:
+                  info = plistlib.loads(z.read(ip))
+                  bid = str(info.get("CFBundleIdentifier", "") or "")
+                  exe = str(info.get("CFBundleExecutable", "") or "")
+                  print("CFBundleIdentifier = %s" % bid)
+                  print("CFBundleExecutable = %s" % exe)
+                  if not bid or "$" in bid:
+                      errs.append("CFBundleIdentifier rong/chua duoc thay trong IPA")
+                  if not exe:
+                      errs.append("CFBundleExecutable rong trong IPA")
+
+                  # 4) executable ton tai + co quyen thuc thi
+                  ex = "%s/%s" % (app, exe)
+                  if not exe:
+                      pass
+                  elif ex not in names:
+                      errs.append("Khong tim thay executable '%s' trong IPA" % ex)
+                  else:
+                      attr = z.getinfo(ex).external_attr >> 16
+                      mode = attr & 0o777
+                      if not (mode & 0o100):
+                          errs.append("Executable trong IPA khong co quyen thuc thi (mode %o)" % mode)
+                      else:
+                          print("exec mode      = %o  (co quyen +x)" % mode)
+
+                      # 5) Mach-O: platform iOS + chi arm64/arm64e
+                      data = z.read(ex)
+                      CPU = {0x0100000C: "arm64", 0x0100000E: "arm64e",
+                             0x01000007: "x86_64", 0x00000007: "i386"}
+                      PLAT = {1: "MACOS", 2: "IOS", 3: "TVOS", 4: "WATCHOS",
+                              6: "MACCATALYST", 7: "IOSSIMULATOR", 8: "TVSIMULATOR",
+                              9: "WATCHSIMULATOR", 11: "VISIONOS"}
+                      MAGIC = {
+                          b"\xcf\xfa\xed\xfe": (64, "little"),
+                          b"\xfe\xed\xfa\xcf": (64, "big"),
+                          b"\xce\xfa\xed\xfe": (32, "little"),
+                          b"\xfe\xed\xfa\xce": (32, "big"),
+                          b"\xca\xfe\xba\xbe": (0, "big"),
+                          b"\xbe\xba\xfe\xca": (0, "little"),
+                      }
+                      m4 = MAGIC.get(bytes(data[0:4]))
+                      if m4 is None:
+                          errs.append("Executable trong IPA khong phai Mach-O")
+                      else:
+                          bits, endi = m4
+                          le = endi == "little"
+                          slices, plats = [], set()
+
+                          def scan(d, off, little, hdrsize=32):
+                              e = "<" if little else ">"
+                              ncmd = struct.unpack_from(e + "I", d, off + 16)[0]
+                              p = off + hdrsize
+                              out = set()
+                              for _ in range(min(ncmd, 4096)):
+                                  try:
+                                      cmd, size = struct.unpack_from(e + "II", d, p)
+                                  except struct.error:
+                                      break
+                                  if cmd == 0x32:  # LC_BUILD_VERSION: cmd,cmdsize,platform,minos,sdk,ntools
+                                      try:
+                                          pl = struct.unpack_from(e + "III", d, p)[2]
+                                          out.add(PLAT.get(pl, "plat#%d" % pl))
+                                      except (struct.error, IndexError):
+                                          pass
+                                  elif cmd == 0x28:
+                                      out.add("IOS")
+                                  if size <= 0:
+                                      break
+                                  p += size
+                              return out
+
+                          if bits:  # thin
+                              hdrsize = 32 if bits == 64 else 28
+                              ct = struct.unpack_from("<I" if le else ">I", data, 4)[0]
+                              slices.append(CPU.get(ct, "cpu#%s" % hex(ct)))
+                              plats |= scan(data, 0, le, hdrsize)
+                          else:      # fat
+                              n = struct.unpack_from("<I" if le else ">I", data, 4)[0]
+                              fmt = "<5I" if le else ">5I"
+                              for i in range(max(0, min(n, 16))):
+                                  ct, _s, coff, _sz, _al = struct.unpack_from(fmt, data, 8 + 20 * i)
+                                  slices.append(CPU.get(ct, "cpu#%s" % hex(ct)))
+                                  sub = MAGIC.get(bytes(data[coff:coff + 4]))
+                                  if sub and sub[0]:
+                                      sle = sub[1] == "little"
+                                      shdr = 32 if sub[0] == 64 else 28
+                                      plats |= scan(data, coff, sle, shdr)
+
+                          print("slices         = %s" % (sorted(set(slices)) or "?"))
+                          print("platform(s)    = %s" % (sorted(plats) or "?"))
+                          intel = {s for s in slices if s in ("x86_64", "i386")}
+                          if intel:
+                              errs.append("Chua slice Intel %s - TrollStore chi nhan arm64/arm64e" % sorted(intel))
+                          if plats and "IOS" not in plats:
+                              errs.append("Khong xac nhan platform iOS device: %s" % sorted(plats))
+
+          # 6) khong co file AppleDouble / rac
+          junk = [n for n in names if n.split("/")[-1].startswith("._")
+                  or n.split("/")[-1] == ".DS_Store"]
+          if junk:
+              errs.append("IPA chua file rac: %s" % junk[:5])
+
+          # 7) khong co duong dan bi chep lai
+          doubled = [n for n in names if n.startswith("Payload/") and n.count("/") >= 3
+                     and "/Payload/" in n]
+          if doubled:
+              errs.append("Co duong dan thuan (Payload bi lap) trong IPA: %s" % doubled[:5])
+
+          print("entries        = %d" % len(names))
+          print("IPA size       = %d bytes" % os.path.getsize(ipa))
+          for e in errs:
+              print("::error::" + e)
+          if errs:
+              sys.exit(1)
+          print("IPA VERIFICATION: OK - cau truc Payload/%s hop le cho TrollStore."
+                % (apps[0][len("Payload/"):] if apps and apps[0].startswith("Payload/") else "?"))
+          PY
+          } 2>&1 | tee -a "$XLOG"
+          RC_STEP="${PIPESTATUS[0]}"
+          echo "======== [STEP END] Verify .ipa exit=$RC_STEP ========" | tee -a "$XLOG"
+          exit "$RC_STEP"
+
+      # ------------------------------------------------------------------------
+      # (8) JOB SUMMARY: in loi ra ngay trang Summary
+      # ------------------------------------------------------------------------
+      - name: Job summary
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          LOG="$GITHUB_WORKSPACE/$BUILD_DIR/xbuild.log"
+          {
+            echo "## TrollStore unsigned IPA"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Project | \`${{ steps.detect.outputs.project_path }}\` |"
+            echo "| Scheme | \`${{ steps.detect.outputs.scheme }}\` |"
+            echo "| Mode | \`${{ inputs.run_mode }}\` |"
+            echo "| Configuration | \`${{ inputs.configuration }}\` |"
+            echo "| Runner | \`${{ env.RUNNER }}\` |"
+            echo "| Xcode | \`$(xcodebuild -version 2>/dev/null | head -n1 || echo '?')\` |"
+            echo "| Bundle ID | \`${{ steps.preflight.outputs.bundle_id }}\` |"
+            echo "| IPA | \`${IPA_PATH:-<khong tao duoc>}\` |"
+            echo "| IPA size | \`${{ steps.package.outputs.size }}\` |"
+            echo "| Build log | artifact \`xbuild-log\` → \`build/Output/xbuild.log\` (day du moi step, ke ca khi fail som) |"
+            echo
+            if [ -f "$LOG" ]; then
+              ERRS=$(grep -E "error:|fatal error|cannot find|Build input file" "$LOG" | tail -n 15 || true)
+              if [ -n "$ERRS" ]; then
+                echo "### 15 dong loi gan nhat (trich tu xbuild.log)"
+                echo
+                echo '```'
+                echo "$ERRS"
+                echo '```'
+                echo
+              fi
+            fi
+            echo "Tai IPA trong muc **Artifacts** (\`<app>-trollstore-unsigned\`), "
+            echo "mo TrollStore tren iPhone -> *Install* -> chon file \`.ipa\`."
+          } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          exit 0
+
+      # ------------------------------------------------------------------------
+      # (9) UPLOAD ARTIFACT - LUON (if: always()) de co ca khi that bai
+      #     xbuild.log duoc tao tu buoc Init (truoc ca Preflight) nen artifact
+      #     'xbuild-log' ton tai trong MOI kich ban fail.
+      # ------------------------------------------------------------------------
+      - name: Upload IPA artifact
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ steps.package.outputs.app_name || 'BinTV' }}-trollstore-unsigned
+          path: ${{ env.BUILD_DIR }}/*.ipa
+          if-no-files-found: ignore
+          retention-days: 30
+          compression-level: 0
+
+      - name: Upload build log artifact
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: xbuild-log
+          path: ${{ env.BUILD_DIR }}/xbuild.log
+          if-no-files-found: warn
+          retention-days: 30
+
+      # tuy chon: tao Release khi push tag "v*"
+      - name: Attach IPA to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: ${{ env.BUILD_DIR }}/*.ipa
+          generate_release_notes: true
