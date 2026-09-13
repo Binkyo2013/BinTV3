@@ -955,7 +955,7 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
                           + "session=\(request.session.isEmpty ? "-" : request.session) "
                           + "url=\(PhimDebugLog.sanitizeURL(request.url)) "
                           + "proxy=\(PhimDebugLog.sanitizeURL(request.proxyURL))")
-        let play = { [weak self] in self?.nativePlayer.play(request) }
+        let play: () -> Void = { [weak self] in self?.nativePlayer.play(request) }
         if Thread.isMainThread { play() } else { DispatchQueue.main.async(execute: play) }
     }
 
