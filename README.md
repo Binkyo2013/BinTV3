@@ -1,10 +1,11 @@
 # BinTV iOS — TrollStore Build (FIXED)
 
-> **Bản mới nhất: 2.5.1 (build 231)** — PHIM phát bằng TRÌNH PHÁT GỐC iOS
-> (AVPlayer): hết lỗi "Không thể phát trên TV" với nguồn MKV/AC3/EAC3/DTS.
-> Chi tiết: mục `### Build 231 (2.5.1)` ở cuối file · Cách lấy file: artifact
-> `BinTV-trollstore-unsigned` (chứa `BinTV.ipa`) của workflow
-> "Build unsigned IPA (TrollStore)".
+> **Bản mới nhất: 2.5.2 (build 232)** — Phụ đề (Vietsub/OpenSubtitles) giờ
+> hiển thị NGAY TRONG trình phát gốc iOS (AVPlayerViewController), đồng bộ
+> theo thời gian phát — không còn bị "mất phụ đề" khi phim chuyển sang
+> player native (build 231). Chi tiết: mục `### Build 232 (2.5.2)` ở cuối
+> file · Cách lấy file: artifact `BinTV-trollstore-unsigned` (chứa
+> `BinTV.ipa`) của workflow "Build unsigned IPA (TrollStore)".
 
 ## Build by GitHub Actions
 
@@ -443,5 +444,47 @@ hành vi khi không có cầu nối.
 **Giới hạn ghi rõ (không hứa suông):** AVFoundation giải mã rộng hơn WebKit (HLS/MP4/MOV,
 AC3/EAC3) nhưng **vẫn không mở được Matroska** — nếu addon CHỈ có `.mkv` progressive thì
 native cũng báo lỗi thật và app.js thử nguồn kế tiếp; đường đúng cho trường hợp đó là
-addon trả HLS/MP4 (hoặc debrid). Phụ đề do app.js render bằng DOM nên **không hiển thị
-trong player native** (player native dùng phụ đề nhúng trong stream nếu có).
+addon trả HLS/MP4 (hoặc debrid). Phụ đề (Vietsub/OpenSubtitles) đã được xử lý ở build
+232 — xem `### Build 232 (2.5.2)`.
+
+### Build 232 (2.5.2) — Phụ đề hiển thị NGAY TRONG trình phát native
+
+**Giới hạn còn lại của build 231:** khi phim phải chuyển sang TRÌNH PHÁT GỐC iOS
+(`AVPlayerViewController` — lớp phủ của HỆ THỐNG), phụ đề do app.js render bằng DOM
+(`#bintv-movie-subtitle-text`) bị che khuất → xem phim native thì **mất Vietsub**, dù
+đã bật CC.
+
+**Cách sửa (không chép lại logic phụ đề, không đụng bản Android/Tizen):** app.js vốn
+đã tải + parse SRT/VTT thành `movieSubtitleCues`; bây giờ danh sách cue đó được **đẩy
+sang Swift** để vẽ lại đúng nhịp trên chính player native:
+
+1. **`BinTV/Phim/Web/assets/app.js`** — hàm mới `pushMovieSubtitlesToNative(cues, label)`
+   nén cue thành `{s,e,t}` (giây) và gửi qua cầu nối **chỉ khi** trình phát native đang
+   chạy (`movieNativeHandoffActive`). Được gọi ở 3 thời điểm: (a) native vừa báo
+   `__bintvNativePlaybackStarted` mà Vietsub đang bật; (b) `applyMovieSubtitle` tải xong
+   phụ đề trong lúc native đang phát; (c) `disableMovieSubtitle` (tắt Vietsub → gửi
+   `cues = []` để gỡ). Không có cầu nối (Android/Tizen/Windows) → trả `false`, hành vi
+   cũ nguyên vẹn.
+2. **`BinTV/Phim/PhimWebView.swift`** — cầu nối `nativeHandoffJS` thêm
+   `window.__bintvSetNativeSubtitles(payload)` → postMessage `{action:"subtitles", label,
+   cues, session}`; message handler `playVideoNative` nhận `action == "subtitles"` (đặt
+   TRƯỚC nhánh `stop` để không bị nhầm là lệnh đóng) → parse cue thành
+   `[NativeSubtitleCue]` → gọi `nativePlayer.updateSubtitles(...)` trên main thread.
+3. **`BinTV/Player/PhimNativePlayerController.swift`** — struct mới `NativeSubtitleCue`
+   `{start, end, text}`; `updateSubtitles` **khoá theo `session`** (phụ đề tải xong muộn
+   sau khi người dùng đã chuyển phim → bị bỏ qua, không đè phụ đề phim mới). Hiển thị
+   bằng `UILabel` treo trên `contentOverlayView` của AVPlayerViewController (vẽ trên cả
+   khi fullscreen), đồng bộ bằng `addPeriodicTimeObserver` 250ms + tìm câu đang chiếu
+   bằng **binary search** (cùng thuật toán `renderCurrentMovieSubtitle` của app.js).
+   Dọn sạch (label + observer) khi đổi nguồn / đóng player / báo lỗi (`teardownCurrentItem`).
+
+**Không ảnh hưởng nền tảng khác:** mọi nhánh mới đều khoá bằng
+`isIosNativePlaybackBridge()` / `window.__bintvSetNativeSubtitles` (chỉ tồn tại trong
+WKWebView iOS). Android/Tizen/Windows không có cầu nối → hàm trả `false` → phụ đề DOM
+cũ chạy nguyên vẹn (có test khẳng định).
+
+**Kiểm chứng (không cần Xcode/iPhone):** `cd tests/ios-native-handoff && npm install &&
+node run.js` → **91/91 PASS** (72 cũ + 19 mới — SUITE C: cầu nối `__bintvSetNativeSubtitles`,
+nén cue `{s,e,t}`, khớp `session`, tắt phụ đề → `cues=[]`, không đẩy khi chưa handoff/đã
+đóng, hành vi khi không có cầu nối, và wiring Swift `action == "subtitles"` /
+`updateSubtitles` / `contentOverlayView`). Swift compile/link vẫn do GitHub Actions xác nhận.

@@ -72,6 +72,17 @@ struct PhimNativePlaybackRequest {
     var logTitle: String { title.isEmpty ? "Phim" : title }
 }
 
+/// Một câu phụ đề (đã parse từ SRT/VTT phía app.js) — hiển thị ĐỒNG BỘ với
+/// thời gian phát của AVPlayer trong trình phát native (build 232).
+struct NativeSubtitleCue {
+    /// Thời điểm bắt đầu hiển thị (giây).
+    let start: TimeInterval
+    /// Thời điểm kết thúc hiển thị (giây).
+    let end: TimeInterval
+    /// Nội dung câu phụ đề (đã strip tag HTML phía app.js).
+    let text: String
+}
+
 /// Trình phát GỐC của iOS cho tab PHIM: nhận `streamUrl` từ `PhimWebView`
 /// (WKScriptMessageHandler) rồi mở `AVPlayerViewController` và phát.
 final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate {
@@ -110,6 +121,16 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
     private var dismissingByFailure = false
     /// Giữ màn hình sáng trong lúc phát (như FLAG_KEEP_SCREEN_ON).
     private var idleTimerWasDisabled = false
+
+    // =================================================================
+    // [build 232] PHỤ ĐỀ TRONG TRÌNH PHÁT NATIVE — app.js đã parse SRT/VTT
+    // và gửi danh sách cue qua message `playVideoNative` (action=subtitles).
+    // Hiển thị bằng UILabel đặt trên contentOverlayView của
+    // AVPlayerViewController, đồng bộ theo currentTime (periodic observer).
+    // =================================================================
+    private var subtitleCues: [NativeSubtitleCue] = []
+    private var subtitleLabel: UILabel?
+    private var subtitleTimeObserver: Any?
 
     /// Thời gian chờ tối đa cho MỘT ứng viên trước khi coi như fail.
     private static let candidateTimeout: TimeInterval = 20
@@ -173,6 +194,24 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
         dismissPlayerController { [weak self] in
             self?.dismissingByFailure = false
         }
+    }
+
+    /// Cập nhật phụ đề cho phiên phát ĐANG CHẠY (app.js gửi khi bật/tắt
+    /// Vietsub, hoặc ngay khi native bắt đầu phát). `cues` rỗng = tắt phụ đề.
+    /// Gọi trên main thread.
+    func updateSubtitles(_ cues: [NativeSubtitleCue], label: String, session: String) {
+        // Chống race: app.js tải phụ đề bất đồng bộ — nếu người dùng đã
+        // chuyển phim/tập khác (session đổi) thì bỏ qua, không đè phụ đề
+        // của phim mới bằng phụ đề cũ.
+        guard let current = request, session.isEmpty || current.session == session else {
+            PhimDebugLog.step("NATIVE", "subtitles", "ignored",
+                              "session lệch — bỏ qua (session=\(session.isEmpty ? "-" : session))")
+            return
+        }
+        PhimDebugLog.step("NATIVE", "subtitles", "begin",
+                          "label=\(label) count=\(cues.count) session=\(session.isEmpty ? "-" : session)")
+        subtitleCues = cues
+        refreshSubtitleOverlay()
     }
 
     // =================================================================
@@ -292,6 +331,10 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
         PhimDebugLog.step("NATIVE", "playing-\(candidate.label)", "ok",
                           "title=\(request?.logTitle ?? "-") session=\(request?.session ?? "-")")
         playerController?.player = player
+        // [build 232] Phụ đề có thể đã được đẩy tới TRƯỚC khi player
+        // present/ready xong — lúc này mới chắc chắn có contentOverlayView
+        // để treo UILabel phụ đề lên.
+        refreshSubtitleOverlay()
         if !startedReported {
             startedReported = true
             if let current = request { onStarted?(current) }
@@ -463,6 +506,7 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
         timeoutWork = nil
         statusObservation = nil
         removeStallObserver()
+        removeSubtitleOverlay()     // [build 232] dọn phụ đề khi đổi/đóng nguồn
         if let player = player {
             player.pause()
             player.replaceCurrentItem(with: nil)
@@ -484,9 +528,98 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
         try? session.setActive(true)
     }
 
+    // =================================================================
+    // [build 232] PHỤ ĐỀ — overlay UILabel + đồng bộ theo thời gian phát
+    // =================================================================
+
+    /// Dựng/xoá overlay + observer cho đúng trạng thái phụ đề hiện tại.
+    private func refreshSubtitleOverlay() {
+        if subtitleCues.isEmpty {
+            removeSubtitleOverlay()
+            return
+        }
+        installSubtitleOverlay()
+        startSubtitleSync()
+        renderSubtitle(at: player?.currentTime().seconds ?? 0)
+    }
+
+    /// Treo UILabel phụ đề lên contentOverlayView của AVPlayerViewController
+    /// (lớp phủ của HỆ THỐNG → phụ đề hiển thị trên cả khi player fullscreen).
+    private func installSubtitleOverlay() {
+        guard subtitleLabel == nil else { return }
+        guard let controller = playerController,
+              let overlay = controller.contentOverlayView else { return }
+        let label = UILabel()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.numberOfLines = 0
+        label.textAlignment = .center
+        label.textColor = .white
+        label.font = UIFont.systemFont(ofSize: 18, weight: .medium)
+        label.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+        label.layer.cornerRadius = 4
+        label.layer.masksToBounds = true
+        label.text = ""
+        overlay.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
+            label.leadingAnchor.constraint(greaterThanOrEqualTo: overlay.leadingAnchor, constant: 24),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: overlay.trailingAnchor, constant: -24),
+            label.bottomAnchor.constraint(equalTo: overlay.safeAreaLayoutGuide.bottomAnchor, constant: -24)
+        ])
+        subtitleLabel = label
+    }
+
+    /// Quan sát currentTime mỗi 250ms (cùng nhịp app.js dùng cho phụ đề DOM)
+    /// để cập nhật câu phụ đề đang chiếu.
+    private func startSubtitleSync() {
+        guard subtitleTimeObserver == nil, let player = player else { return }
+        let interval = CMTime(seconds: 0.25, preferredTimescale: 600)
+        subtitleTimeObserver = player.addPeriodicTimeObserver(forInterval: interval,
+                                                               queue: .main) { [weak self] time in
+            self?.renderSubtitle(at: time.seconds)
+        }
+    }
+
+    /// Tìm câu phụ đề đang chiếu bằng binary search (mảng cues đã được app.js
+    /// sắp theo `start`) — giống renderCurrentMovieSubtitle của app.js.
+    private func renderSubtitle(at time: TimeInterval) {
+        guard let label = subtitleLabel else { return }
+        let cues = subtitleCues
+        guard !cues.isEmpty else {
+            if label.text != "" { label.text = "" }
+            return
+        }
+        var low = 0
+        var high = cues.count - 1
+        var candidate = -1
+        while low <= high {
+            let mid = (low + high) / 2
+            if cues[mid].start <= time { candidate = mid; low = mid + 1 }
+            else { high = mid - 1 }
+        }
+        let text: String
+        if candidate >= 0 && time <= cues[candidate].end { text = cues[candidate].text }
+        else { text = "" }
+        if label.text != text { label.text = text }
+    }
+
+    /// Gỡ label + observer (tắt phụ đề / đổi nguồn / đóng player).
+    private func removeSubtitleOverlay() {
+        if let observer = subtitleTimeObserver {
+            player?.removeTimeObserver(observer)
+            subtitleTimeObserver = nil
+        }
+        subtitleLabel?.removeFromSuperview()
+        subtitleLabel = nil
+        subtitleCues = []
+    }
+
     deinit {
         timeoutWork?.cancel()
         statusObservation = nil
+        if let observer = subtitleTimeObserver {
+            player?.removeTimeObserver(observer)
+        }
         if let observer = stallObserver {
             NotificationCenter.default.removeObserver(observer)
         }
