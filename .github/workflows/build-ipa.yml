@@ -100,9 +100,18 @@ on:
           - macos-15
           - self-hosted
 
+  # [2026-09-13] Push tag "v*" -> build + tao GitHub Release kem file .ipa
+  # (step "Attach IPA to GitHub Release" duoc kich hoat khi
+  #  startsWith(github.ref, 'refs/tags/v')).
+  push:
+    tags:
+      - "v*"
+
 
 permissions:
-  contents: read
+  # [2026-09-13] 'write' de step Attach IPA tao duoc Release + tai len asset
+  # khi chay bang tag v* (trước la 'read' -> Release se loi 403).
+  contents: write
 
 concurrency:
   group: build-ipa-${{ github.ref }}
