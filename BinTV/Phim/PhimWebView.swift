@@ -32,6 +32,22 @@ import AVFoundation
 //    app BinTV.
 //  - clearCookies() = NO-OP — không xóa cookie cả app (phá phiên
 //    YouTube của tab TUBE).
+//
+// [build 231 — 2026-09-13] THÊM CẦU NỐI NATIVE PLAYER (sửa lỗi
+// "Không thể phát trên TV" khi bấm xem phim trên iPhone):
+//  - WKScriptMessageHandler MỚI: `playVideoNative` — JS gửi
+//    { url: streamUrl, title, proxyUrl, referer, reason, session }.
+//  - User script MỚI `nativeHandoffJS` (document-start): cung cấp
+//    window.__bintvPlayVideoNative / __bintvStopVideoNative và bắt sự kiện
+//    người dùng CLICK thẻ phim (ghi "ý định phát" — id + tên phim).
+//  - Nhận message → `PhimNativePlayerController` (BinTV/Player/) mở
+//    AVPlayerViewController và phát bằng AVFoundation. Kết quả
+//    (started/failed/closed) được trả về JS bằng evaluateJavaScript để
+//    app.js thử nguồn kế tiếp hoặc dọn UI — KHÔNG bao giờ im lặng.
+//  - `allowsInlineMediaPlayback = true` + `mediaTypesRequiringUserActionForPlayback = []`
+//    (đã có từ build 226) là ĐIỀU KIỆN CẦN cho cả hai đường phát: web
+//    (thẻ <video> inline, không bị WebKit bắt cóc sang fullscreen) và
+//    native (không cần gesture khi AVPlayerViewController tự present).
 // =====================================================================
 
 final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, WKNavigationDelegate {
@@ -41,6 +57,18 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     let webView: WKWebView
     private var server: PhimLocalServer?
     private var started = false
+
+    // =================================================================
+    // [build 231 — 2026-09-13] TRÌNH PHÁT GỐC iOS CHO TAB PHIM
+    // Nhận `streamUrl` từ web app (message handler `playVideoNative`) rồi
+    // mở AVPlayerViewController — xem BinTV/Player/PhimNativePlayerController.swift.
+    // Lý do cần: WKWebView (WebKit/HTML5) KHÔNG giải mã được nhiều nguồn
+    // Stremio addon (container MKV, audio AC3/EAC3/DTS) → app.js hết nguồn
+    // dự phòng → hiện "Không thể phát nguồn phim này trên TV" và không phát
+    // gì. AVFoundation của player native giải mã rộng hơn hẳn (HLS/MP4/MOV,
+    // AC3/EAC3) nên đây là đường phát ĐÚNG cho các nguồn đó trên iPhone.
+    // =================================================================
+    private let nativePlayer = PhimNativePlayerController()
 
     /// Long-press trên webview (≥0.35s) → hiển thị menu tab
     /// (LIVE TV/TUBE/PHIM/SETTINGS) — nhất quán 4 tab. Gắn bởi PhimView.
@@ -82,6 +110,18 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         configuration.userContentController.addUserScript(
             WKUserScript(source: Self.bridgeShimJS, injectionTime: .atDocumentStart, forMainFrameOnly: true)
         )
+        // =================================================================
+        // [build 231 — 2026-09-13] CẦU NỐI NATIVE PLAYER (JS → Swift)
+        // Tiêm ở DOCUMENT START để `window.__bintvPlayVideoNative` tồn tại
+        // TRƯỚC khi app.js chạy: app.js gọi hàm này khi nguồn phim là thứ
+        // WebKit không giải mã được (MKV / AC3/EAC3/DTS) hoặc khi <video>
+        // báo lỗi — thay vì rơi vào nhánh fallback TV ("Không thể phát …
+        // trên TV"). Kèm listener CAPTURE trên document bắt sự kiện người
+        // dùng CLICK thẻ phim (ghi "ý định phát": id + tên phim).
+        // =================================================================
+        configuration.userContentController.addUserScript(
+            WKUserScript(source: Self.nativeHandoffJS, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+        )
         // Hook console.* của web app → phim_debug.log (xem consoleCaptureJS).
         configuration.userContentController.addUserScript(
             WKUserScript(source: Self.consoleCaptureJS, injectionTime: .atDocumentStart, forMainFrameOnly: true)
@@ -117,7 +157,18 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         // userContentController mà WKWebView đang dùng.
         configuration.userContentController.add(self, name: "phimBridge")
         configuration.userContentController.add(self, name: "phimConsole")
+        // =================================================================
+        // [build 231 — 2026-09-13] Message handler `playVideoNative`:
+        // JS gửi { url: streamUrl, title, proxyUrl, referer, reason, session }
+        // → userContentController(_:didReceive:) bên dưới → mở trình phát
+        // GỐC (AVPlayerViewController) trong BinTV/Player/.
+        // =================================================================
+        configuration.userContentController.add(self, name: "playVideoNative")
         webView.navigationDelegate = self
+        // Nối callback của native player về web app (evaluateJavaScript):
+        // started / failed / closed — nhờ đó app.js thử nguồn kế tiếp,
+        // hiện thông báo THẬT, hoặc dọn UI khi người dùng đóng player.
+        configureNativePlayerCallbacks()
         // [build 224] Theo dõi app rời/vào lại foreground — phục hồi tab
         // PHIM khi WebContent process hoặc socket server bị hệ thống dừng.
         installLifecycleObservers()
@@ -702,7 +753,214 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     })();
     """
 
+    // =====================================================================
+    // [build 231 — 2026-09-13] CẦU NỐI NATIVE PLAYER (transport JS → Swift)
+    //
+    // Script này TIÊM TỪ SWIFT (document-start) nên chắc chắn tồn tại trước
+    // khi app.js chạy, không phụ thuộc file trong bundle. Nó chỉ làm phần
+    // VẬN CHUYỂN:
+    //   • `window.__bintvPlayVideoNative(payload)` → postMessage sang handler
+    //     `playVideoNative` (payload tối thiểu {url, title} — đúng chữ ký
+    //     WKScriptMessageHandler; Swift đọc thêm proxyUrl/referer/reason/session).
+    //   • `window.__bintvStopVideoNative()` → yêu cầu đóng AVPlayer.
+    //   • Bắt sự kiện người dùng CLICK/ENTER trên thẻ phim (capture phase,
+    //     chạy TRƯỚC listener của app.js) → ghi `window.__bintvLastPlayIntent`
+    //     {id, name, type, at}: app.js dùng làm tiêu đề khi gửi streamUrl,
+    //     đồng thời đây là bằng chứng user-activation của lần phát.
+    // CHÍNH SÁCH (khi nào handoff) nằm trong app.js — xem các hàm
+    // `iosNeedsNativePlayerFor` / `requestNativeMoviePlayback`.
+    // =====================================================================
+
+    private static let nativeHandoffJS = """
+    (function () {
+        "use strict";
+        if (window.__binTVNativeHandoff) { return; }
+        window.__binTVNativeHandoff = true;
+        // Cờ để web app nhận biết đang chạy trong WKWebView iOS có cầu nối.
+        window.__bintvIosNativeBridge = true;
+
+        function handler() {
+            try {
+                return window.webkit && window.webkit.messageHandlers
+                    && window.webkit.messageHandlers.playVideoNative;
+            } catch (e) { return null; }
+        }
+        window.__bintvNativeBridgeAvailable = function () { return !!handler(); };
+
+        function text(value) {
+            try { return String(value === null || value === undefined ? "" : value); }
+            catch (e) { return ""; }
+        }
+
+        // Gửi streamUrl sang Swift native (AVPlayerViewController).
+        window.__bintvPlayVideoNative = function (payload) {
+            var bridge = handler();
+            if (!bridge) { return false; }
+            try {
+                var body = payload || {};
+                bridge.postMessage({
+                    url: text(body.url),
+                    title: text(body.title),
+                    proxyUrl: text(body.proxyUrl),
+                    referer: text(body.referer),
+                    reason: text(body.reason),
+                    session: text(body.session)
+                });
+                return true;
+            } catch (e) { return false; }
+        };
+
+        // Yêu cầu Swift đóng trình phát native (web app đóng player / Back).
+        window.__bintvStopVideoNative = function () {
+            var bridge = handler();
+            if (!bridge) { return false; }
+            try {
+                bridge.postMessage({ action: "stop", url: "", title: "" });
+                return true;
+            } catch (e) { return false; }
+        };
+
+        // -----------------------------------------------------------------
+        // Bắt sự kiện người dùng CLICK (hoặc ENTER/SPACE) vào thẻ phim.
+        // Capture phase trên document → chạy trước listener của app.js và
+        // không preventDefault/stopPropagation (app.js mở phim như cũ).
+        // -----------------------------------------------------------------
+        window.__bintvLastPlayIntent = null;
+        function recordIntent(node) {
+            try {
+                var element = node;
+                var hops = 0;
+                while (element && element !== document.body && hops < 12) {
+                    hops++;
+                    var classes = element.classList;
+                    if (classes && (classes.contains("movie-card") || classes.contains("movie-card-poster"))) {
+                        window.__bintvLastPlayIntent = {
+                            id: (element.getAttribute && element.getAttribute("data-movie-id")) || "",
+                            name: (element.getAttribute && element.getAttribute("data-movie-name")) || "",
+                            type: (element.getAttribute && element.getAttribute("data-movie-type")) || "",
+                            at: Date.now()
+                        };
+                        try {
+                            console.log("[NATIVE] play intent: " + (window.__bintvLastPlayIntent.name || "?")
+                                + " (" + (window.__bintvLastPlayIntent.id || "?") + ")");
+                        } catch (e2) {}
+                        return true;
+                    }
+                    element = element.parentNode;
+                }
+            } catch (e) {}
+            return false;
+        }
+        document.addEventListener("click", function (event) {
+            recordIntent(event && event.target);
+        }, true);
+        document.addEventListener("keydown", function (event) {
+            var key = text(event && event.key);
+            var code = (event && (event.keyCode || event.which)) || 0;
+            if (key === "Enter" || key === " " || code === 13 || code === 32) {
+                recordIntent(document.activeElement || (event && event.target));
+            }
+        }, true);
+    })();
+    """
+
+    // =====================================================================
+    // [build 231] Xử lý message `playVideoNative` → mở trình phát GỐC iOS
+    // =====================================================================
+
+    /// Nối callback của `PhimNativePlayerController` về web app (JS).
+    /// app.js dùng `session` để bỏ qua callback cũ (người dùng đã chuyển phim).
+    private func configureNativePlayerCallbacks() {
+        nativePlayer.onStarted = { [weak self] request in
+            PhimDebugLog.step("BRIDGE", "nativeStarted→JS", "ok",
+                              "session=\(request.session) title=\(request.logTitle)")
+            self?.notifyWebApp(function: "__bintvNativePlaybackStarted", payload: [
+                "session": request.session,
+                "title": request.title,
+                "url": request.url
+            ])
+        }
+        nativePlayer.onFailure = { [weak self] request, message in
+            PhimDebugLog.step("BRIDGE", "nativeFailed→JS", "FAIL",
+                              "session=\(request.session) title=\(request.logTitle) \(message)")
+            self?.notifyWebApp(function: "__bintvNativePlaybackFailed", payload: [
+                "session": request.session,
+                "title": request.title,
+                "url": request.url,
+                "message": message
+            ])
+        }
+        nativePlayer.onClosed = { [weak self] request in
+            PhimDebugLog.step("BRIDGE", "nativeClosed→JS", "ok",
+                              "session=\(request.session) title=\(request.logTitle)")
+            self?.notifyWebApp(function: "__bintvNativePlaybackClosed", payload: [
+                "session": request.session,
+                "title": request.title
+            ])
+        }
+    }
+
+    /// Gọi hàm JS của web app với payload ĐÃ JSON-hoá (JSON là literal hợp lệ
+    /// trong JS nên không cần escape thủ công — không có đường tiêm chuỗi).
+    private func notifyWebApp(function name: String, payload: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+              let json = String(data: data, encoding: .utf8) else { return }
+        let js = "try { if (typeof window.\(name) === 'function') { window.\(name)(\(json)); } } catch (e) {}"
+        let run = { [weak self] in
+            self?.webView.evaluateJavaScript(js, completionHandler: nil)
+        }
+        if Thread.isMainThread { run() } else { DispatchQueue.main.async(execute: run) }
+    }
+
+    /// Đọc message `playVideoNative`: {url, title, proxyUrl, referer, reason,
+    /// session} (hoặc {action:"stop"}) → mở/đóng trình phát native.
+    private func handlePlayVideoNative(_ body: Any?) {
+        let dict = (body as? [String: Any]) ?? [:]
+        func text(_ keys: String...) -> String {
+            for key in keys {
+                if let value = dict[key] as? String {
+                    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty { return trimmed }
+                }
+            }
+            return ""
+        }
+        let action = text("action")
+        let url = text("url", "streamUrl", "streamURL", "src")
+        let proxyURL = text("proxyUrl", "proxyURL", "proxy")
+        // Không có URL (hoặc yêu cầu dừng tường minh) → đóng player native.
+        if action == "stop" || action == "close" || (url.isEmpty && proxyURL.isEmpty) {
+            PhimDebugLog.step("BRIDGE", "playVideoNative", "stop",
+                              (url.isEmpty && proxyURL.isEmpty)
+                                ? "payload không có url → dừng player native"
+                                : "action=\(action)")
+            let stop = { [weak self] in self?.nativePlayer.stop() }
+            if Thread.isMainThread { stop() } else { DispatchQueue.main.async(execute: stop) }
+            return
+        }
+        let request = PhimNativePlaybackRequest(
+            url: url,
+            proxyURL: proxyURL,
+            title: text("title", "name"),
+            referer: text("referer", "referrer", "__ref"),
+            reason: text("reason", "source"),
+            session: text("session")
+        )
+        PhimDebugLog.step("BRIDGE", "playVideoNative", "recv",
+                          "title=\(request.logTitle) reason=\(request.reason.isEmpty ? "-" : request.reason) "
+                          + "session=\(request.session.isEmpty ? "-" : request.session) "
+                          + "url=\(PhimDebugLog.sanitizeURL(request.url)) "
+                          + "proxy=\(PhimDebugLog.sanitizeURL(request.proxyURL))")
+        let play = { [weak self] in self?.nativePlayer.play(request) }
+        if Thread.isMainThread { play() } else { DispatchQueue.main.async(execute: play) }
+    }
+
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        // [build 231] JS yêu cầu phát bằng TRÌNH PHÁT GỐC iOS (AVPlayer).
+        if message.name == "playVideoNative" {
+            handlePlayVideoNative(message.body)
+            return
+        }
         if message.name == "phimConsole" {
             // LOG CỦA WEB APP (app.js/hls.js: [STREAM], [HLS], [PLAYER],
             // [PHIM_DEBUG], video.onerror, hls.js fatal error...) →

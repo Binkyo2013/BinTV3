@@ -292,12 +292,21 @@
          phien ban cu cache trong Electron. Neu khong thay log moi, hay xoa
          file phim-debug.log cu, dong app, xoa thu muc, giai nen lai. -->
     <script src="assets/stremio.js"></script>
-    <script src="assets/app.js?v=20260903p"></script>
+    <!-- [build 231 — 2026-09-13] ?v=20260913a: app.js co NATIVE HANDOFF cho
+         iOS WKWebView (gui streamUrl sang Swift qua message handler
+         `playVideoNative` de mo AVPlayerViewController — thay vi roi vao
+         nhanh fallback TV "Khong the phat nguon phim nay tren TV").
+         Server tra .js voi Cache-Control: no-store nen cache busting chi la
+         lop bao hiem them. -->
+    <script src="assets/app.js?v=20260913a"></script>
     <!-- [BinTV iOS 2026-09] Fallback phat TRUC TIEP cho iOS WebKit (chi bat
          khi khong co MSE + native HLS ho tro; tren Android la no-op).
          Chi can thiem de debug + thuc hien 1 lan retry direct khi proxy
-         fail - khong thay doi flow goc cua app.js. -->
-    <script src="assets/phim_ios_fallback.js?v=20260912a"></script>
+         fail - khong thay doi flow goc cua app.js.
+         [build 231] them buoc leo thang cuoi: proxy fail + direct fail
+         (cung 1 src) -> goi window.__bintvRequestNativePlayback() de chuyen
+         streamUrl sang trinh phat GOC cua iOS (AVPlayer). -->
+    <script src="assets/phim_ios_fallback.js?v=20260913a"></script>
 
     <script>
     // [Phim DEBUG 2026-09] Sau khi app.js load, ghi log xác nhận

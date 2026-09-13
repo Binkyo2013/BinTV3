@@ -223,6 +223,48 @@
     // phim qua nhieu phut, key het han -> playback fail. Khi do, tu dong
     // thu stream tiep theo trong danh sach streams[] (thuong co 3-5 nguon).
     var movieStreamFallback = null;
+    // =================================================================
+    // [BinTV iOS build 231 — 2026-09-13] NATIVE HANDOFF CHO iOS WKWEBVIEW
+    //
+    // Trên iPhone, thẻ <video> HTML5 của WebKit KHÔNG giải mã được nhiều
+    // nguồn Stremio addon (vnstream/viptorrent/vimo/sc.k-20…) khi chúng là
+    // container MKV hoặc audio AC3/EAC3/DTS → video.onerror → app.js hết
+    // nguồn dự phòng → rơi vào nhánh fallback dành cho TV và hiện
+    // "Không thể phát nguồn phim này trên TV" (trong khi Android/Windows/
+    // Tizen phát bình thường cùng nguồn đó).
+    //
+    // Sửa ĐÚNG NGUYÊN NHÂN, KHÔNG phá bản Android/Tizen/Windows:
+    //   • Khi chạy TRONG WKWebView của BinTV iOS (phát hiện bằng
+    //     `window.webkit.messageHandlers.playVideoNative` — chỉ tồn tại
+    //     trên iOS), app.js gửi `streamUrl` sang Swift qua message handler
+    //     `playVideoNative`; Swift mở AVPlayerViewController (trình phát
+    //     GỐC của iOS, engine AVFoundation giải mã rộng hơn HTML5) —
+    //     xem BinTV/Player/PhimNativePlayerController.swift.
+    //   • NHÁNH TV/EXTERNAL PLAYER (webapis.avplay của Tizen, mở app ngoài)
+    //     bị VÔ HIỆU HOÁ khi chạy trên iOS WKWebView.
+    //   • Trên Android/Tizen/Windows: KHÔNG có handler đó → mọi hàm dưới
+    //     đây trả false → hành vi cũ GIỮ NGUYÊN 100%.
+    // =================================================================
+    // Id phiên phát — tăng mỗi lần startMoviePlayback. Native echo lại để
+    // JS bỏ qua callback cũ (người dùng đã chuyển phim/tập khác).
+    var movieNativePlaybackSession = 0;
+    // Đã gửi nguồn hiện tại sang native và đang chờ kết quả.
+    var movieNativeHandoffActive = false;
+    // Các URL đã thử bằng native trong phiên (chống gửi lặp cùng 1 nguồn).
+    var movieNativeHandoffUrls = {};
+    // Số lần handoff của phiên hiện tại (chống loop JS ↔ native vô hạn).
+    var movieNativeHandoffCount = 0;
+    // Trần handoff cho MỘT phiên phát (mỗi nguồn chỉ thử native 1 lần).
+    var MOVIE_NATIVE_HANDOFF_MAX = 3;
+    // Nguồn đang phát: URL GỐC (addon trả về) + URL đã bọc /proxy + Referer.
+    var movieCurrentStreamUrl = "";
+    var movieCurrentStreamProxyUrl = "";
+    var movieCurrentStreamReferer = "";
+    var movieCurrentStreamTitle = "";
+    var movieCurrentStreamInfo = null;
+    // Nguồn XẾP HẠNG CAO NHẤT của phiên phát hiện tại (validStreams[0]) —
+    // khi mọi nguồn web đều lỗi thì native thử nguồn tốt nhất này.
+    var movieNativeSessionPrimaryUrl = "";
     var movieBootstrapRequestInFlight = null;
     var movieBootstrapCache = null;
     var moviePrefetchTimer = null;
@@ -4663,6 +4705,294 @@
         movieStreamFallback = null;
     }
 
+    // =================================================================
+    // [BinTV iOS build 231] CẦU NỐI sang TRÌNH PHÁT GỐC (Swift/AVPlayer)
+    // Chỉ hoạt động khi web app đang chạy TRONG WKWebView của BinTV iOS
+    // (có message handler `playVideoNative`). Trên Android/Tizen/Windows/
+    // trình duyệt thường: mọi hàm trả false → luồng cũ không đổi.
+    // =================================================================
+
+    // Đang chạy trong WKWebView iOS có cầu nối native?
+    function isIosNativePlaybackBridge() {
+        try {
+            return !!(window.webkit && window.webkit.messageHandlers
+                      && window.webkit.messageHandlers.playVideoNative);
+        } catch (e) { return false; }
+    }
+    // Alias rõ nghĩa dùng ở các nhánh cần "tắt luồng TV/external".
+    function isIosWebViewRuntime() {
+        return isIosNativePlaybackBridge();
+    }
+
+    // Đọc Referer mà app.js đã gắn vào query (`referer=`) — addon khai báo
+    // trong behaviorHints.headers.Referer; loadMovieStreams nối vào URL.
+    function extractStreamReferer(url) {
+        try {
+            var text = String(url || "");
+            var qIndex = text.indexOf("?");
+            if (qIndex < 0) return "";
+            var match = text.substring(qIndex + 1).match(/(?:^|&)referer=([^&]+)/i);
+            if (!match || !match[1]) return "";
+            return decodeURIComponent(match[1]);
+        } catch (e) { return ""; }
+    }
+
+    // Bọc URL qua /proxy của server nội bộ (127.0.0.1) — ĐÚNG công thức mà
+    // startMoviePlayback đang dùng: proxy forward Referer/User-Agent, resolve
+    // DoH, rewrite playlist m3u8 và đi RawHttp cho http:// (không bị ATS chặn).
+    function buildProxiedStreamUrl(url, referer) {
+        var target = String(url || "");
+        if (!target) return "";
+        try {
+            if (window.AndroidBridge && typeof window.AndroidBridge.proxyMedia === "function") {
+                var bridged = window.AndroidBridge.proxyMedia(target, referer || "");
+                if (bridged) return String(bridged);
+            }
+        } catch (e) {}
+        try {
+            if (/^https?:\/\//i.test(target) === false) return "";
+            var parsed = (function () { var a = document.createElement("a"); a.href = target; return a; })();
+            var origin = (window.location && window.location.origin) ? String(window.location.origin) : "";
+            if (!origin || parsed.origin === origin) return "";
+            return origin.replace(/\/+$/, "") + "/proxy?url=" + encodeURIComponent(target)
+                + (referer ? "&__ref=" + encodeURIComponent(referer) : "");
+        } catch (e2) { return ""; }
+    }
+
+    // Container/codec mà WebKit KHÔNG giải mã được → chuyển THẲNG sang
+    // AVPlayer native, không mất thời gian chờ <video> fail rồi mới chữa.
+    // HLS (.m3u8) KHÔNG nằm trong danh sách này: WebKit phát HLS native rất
+    // tốt (kể cả AC3/EAC3 trong HLS) nên cứ để web thử trước — chỉ handoff
+    // khi nó thật sự báo lỗi.
+    function iosNeedsNativePlayerFor(url, streamInfo) {
+        if (!isIosNativePlaybackBridge()) return false;
+        var target = String(url || "");
+        if (!target) return false;
+        // (1) Container WebKit không mở được (Matroska/AVI/FLV/WMV/RM/MPEG-PS).
+        //     SOI THEO ĐƯỜNG DẪN (trước ? và #) TRƯỚC — nếu soi cả URL thì
+        //     "movie.mp4?next=https://x/y.mkv" bị nhận nhầm là MKV (false
+        //     positive → bỏ qua nguồn MP4 mà WebKit phát được).
+        var cut = target.search(/[?#]/);
+        var pathPart = cut >= 0 ? target.substring(0, cut) : target;
+        var UNSUPPORTED_CONTAINER = /\.(mkv|avi|flv|wmv|rmvb|rm|divx|mpg|mpeg)$/i;
+        var ANY_MEDIA_EXT = /\.(m3u8|mpd|mp4|m4v|webm|mov|mkv|avi|flv|ts|wmv|rmvb|divx|mpg|mpeg)$/i;
+        if (UNSUPPORTED_CONTAINER.test(pathPart)) return true;
+        // Đường dẫn KHÔNG có đuôi media nào (vd /player.php, /stream/abc) mà
+        // tham số lại trỏ tới file MKV/AVI… → vẫn là nguồn WebKit không mở
+        // được, cho sang native. (Có đuôi media rồi → KHÔNG soi query.)
+        if (!ANY_MEDIA_EXT.test(pathPart)
+            && /\.(mkv|avi|flv|wmv|rmvb|divx)(?:[?#&=%]|$)/i.test(target)) return true;
+        // (2) File progressive (không phải HLS) mà addon quảng cáo audio
+        //     AC3/EAC3/DTS/TrueHD — <video> của WebKit từ chối (canPlayType "").
+        var isHls = /m3u8/i.test(target);
+        if (!isHls) {
+            var meta = "";
+            try {
+                meta = [streamInfo && streamInfo.name, streamInfo && streamInfo.title,
+                        streamInfo && streamInfo.filename,
+                        streamInfo && streamInfo.raw && streamInfo.raw.behaviorHints
+                            && streamInfo.raw.behaviorHints.filename]
+                    .filter(function (v) { return typeof v === "string" && v; }).join(" ");
+            } catch (e) { meta = ""; }
+            // Ranh giới 2 bên bắt buộc (không phải chữ/số) để KHÔNG dính
+            // false-positive với tên phim/tập có chứa chuỗi tương tự.
+            if (/(?:^|[^a-z0-9])(ac[-_ ]?3|e[-_ ]?ac[-_ ]?3|dts(?:[-_ ]?hd)?(?:[-_ ]?ma)?|truehd|atmos)(?:[^a-z0-9]|$)/i.test(meta)) return true;
+        }
+        return false;
+    }
+
+    // Ghi lại nguồn đang phát (để nhánh lỗi còn biết URL nào cần handoff).
+    function rememberMovieStreamSource(url, title, streamInfo) {
+        movieCurrentStreamUrl = String(url || "");
+        movieCurrentStreamTitle = String(title || "");
+        movieCurrentStreamInfo = streamInfo || null;
+        movieCurrentStreamReferer = extractStreamReferer(movieCurrentStreamUrl);
+        movieCurrentStreamProxyUrl = buildProxiedStreamUrl(movieCurrentStreamUrl, movieCurrentStreamReferer);
+    }
+
+    // Reset trạng thái handoff khi bắt đầu một phiên phát MỚI (phim/tập khác).
+    function resetMovieNativeHandoff(fullReset) {
+        movieNativeHandoffActive = false;
+        if (fullReset) {
+            movieNativeHandoffUrls = {};
+            movieNativeHandoffCount = 0;
+        }
+    }
+
+    // Tiêu đề phim: ưu tiên tiêu đề app.js đang giữ, kế đến là "ý định phát"
+    // do cầu nối iOS ghi lại khi người dùng CLICK thẻ phim.
+    function currentMoviePlaybackTitle(fallbackTitle) {
+        var text = String(fallbackTitle || movieCurrentStreamTitle || "");
+        if (text) return text;
+        try {
+            var intent = window.__bintvLastPlayIntent;
+            if (intent && intent.name) return String(intent.name);
+        } catch (e) {}
+        try {
+            if (movieEpisodeTitle) return String(movieEpisodeTitle);
+        } catch (e2) {}
+        return "Phim";
+    }
+
+    // GỬI streamUrl SANG SWIFT NATIVE (WKScriptMessageHandler `playVideoNative`).
+    // Trả về true khi đã gửi thành công (app.js KHÔNG hiện lỗi "trên TV" nữa).
+    function requestNativeMoviePlayback(reason, explicitUrl) {
+        if (!isIosNativePlaybackBridge()) return false;
+        var url = String(explicitUrl || movieCurrentStreamUrl || "");
+        // Referer đọc được từ chính URL đang gán cho <video> (tham số __ref
+        // của route /proxy) — dùng khi app.js chưa kịp ghi movieCurrentStreamReferer.
+        var proxyReferer = "";
+        // Cầu nối iOS (script tiêm từ Swift) ghi sẵn URL đang gán cho <video>
+        // khi app.js chưa kịp ghi (vd lỗi xảy ra rất sớm).
+        if (!url) {
+            try {
+                var video = document.getElementById("bintv-movie-html5-player");
+                var src = String((video && (video.currentSrc || video.src)) || "");
+                if (src.indexOf("/proxy?url=") !== -1) {
+                    var m = src.match(/\/proxy\?url=([^&]+)/);
+                    if (m && m[1]) { try { url = decodeURIComponent(m[1]); } catch (e) { url = m[1]; } }
+                    var refMatch = src.match(/[?&]__ref=([^&]+)/i);
+                    if (refMatch && refMatch[1]) {
+                        try { proxyReferer = decodeURIComponent(refMatch[1]); } catch (e5) { proxyReferer = refMatch[1]; }
+                    }
+                } else if (/^https?:\/\//i.test(src)) { url = src; }
+            } catch (e2) {}
+        }
+        if (!url) {
+            try { window.__phimDebug && window.__phimDebug.warn("[NATIVE] handoff bỏ qua: không có streamUrl"); } catch (e3) {}
+            return false;
+        }
+        // Không gửi lại cùng một nguồn (native đã thử và đã báo fail).
+        if (movieNativeHandoffUrls[url]) return false;
+        if (movieNativeHandoffCount >= MOVIE_NATIVE_HANDOFF_MAX) {
+            try { window.__phimDebug && window.__phimDebug.warn("[NATIVE] đạt trần handoff (" + MOVIE_NATIVE_HANDOFF_MAX + ")"); } catch (e4) {}
+            return false;
+        }
+
+        movieNativePlaybackSession += 1;
+        var session = String(movieNativePlaybackSession);
+        var referer = movieCurrentStreamReferer || proxyReferer || extractStreamReferer(url);
+        var proxyUrl = (url === movieCurrentStreamUrl && movieCurrentStreamProxyUrl)
+            ? movieCurrentStreamProxyUrl
+            : buildProxiedStreamUrl(url, referer);
+        var title = currentMoviePlaybackTitle();
+        var payload = {
+            url: url,                       // streamUrl GỐC của addon
+            title: title,
+            proxyUrl: proxyUrl,             // đường /proxy (Referer/UA/DoH/ATS)
+            referer: referer,
+            reason: String(reason || ""),
+            session: session
+        };
+
+        var sent = false;
+        try {
+            // Helper do Swift tiêm (document-start) — JSON hoá + postMessage.
+            if (typeof window.__bintvPlayVideoNative === "function") {
+                sent = window.__bintvPlayVideoNative(payload) === true;
+            }
+        } catch (e5) { sent = false; }
+        if (!sent) {
+            try {
+                // Đường dự phòng: gọi thẳng handler (đúng chữ ký WKScriptMessageHandler).
+                window.webkit.messageHandlers.playVideoNative.postMessage({
+                    url: payload.url,
+                    title: payload.title
+                });
+                sent = true;
+            } catch (e6) { sent = false; }
+        }
+        if (!sent) return false;
+
+        movieNativeHandoffUrls[url] = true;
+        movieNativeHandoffCount += 1;
+        movieNativeHandoffActive = true;
+        movieCurrentStreamUrl = url;
+        movieCurrentStreamProxyUrl = proxyUrl;
+        movieCurrentStreamReferer = referer;
+        try {
+            window.__phimDebug && window.__phimDebug.log("[NATIVE] handoff →", {
+                reason: payload.reason, session: session, title: title,
+                url: url.substring(0, 140), proxy: String(proxyUrl).substring(0, 140)
+            });
+        } catch (e7) {}
+        if (moviePlayerOpen) updateMoviePlayerStatus("Đang mở trình phát gốc iOS…");
+        return true;
+    }
+    // Alias public (phim_ios_fallback.js và script tiêm từ Swift có thể gọi).
+    window.__bintvRequestNativePlayback = function (reason) {
+        return requestNativeMoviePlayback(reason || "external");
+    };
+
+    // -----------------------------------------------------------------
+    // CALLBACK TỪ SWIFT (PhimWebView.evaluateJavaScript) — kèm `session`
+    // để loại bỏ callback cũ của phiên phát trước.
+    // -----------------------------------------------------------------
+
+    function isStaleNativeCallback(info) {
+        try {
+            var session = String((info && (info.session || "")) || "");
+            return !!session && session !== String(movieNativePlaybackSession);
+        } catch (e) { return false; }
+    }
+
+    // Native ĐÃ phát được → cập nhật trạng thái player web (đang nằm sau
+    // AVPlayerViewController) để khi người dùng đóng thì UI nhất quán.
+    window.__bintvNativePlaybackStarted = function (info) {
+        if (isStaleNativeCallback(info)) return;
+        movieNativeHandoffActive = true;
+        try { window.__phimDebug && window.__phimDebug.log("[NATIVE] phát thành công", info && info.title); } catch (e) {}
+        if (moviePlayerOpen) updateMoviePlayerStatus("Đang phát (trình phát gốc iOS)");
+    };
+
+    // Native KHÔNG phát được (đã thử cả direct lẫn proxy) → thử nguồn addon
+    // kế tiếp trong web; hết nguồn → thông báo THẬT (không còn chữ "trên TV").
+    window.__bintvNativePlaybackFailed = function (info) {
+        if (isStaleNativeCallback(info)) return;
+        movieNativeHandoffActive = false;
+        var detail = String((info && info.message) || "");
+        try { window.__phimDebug && window.__phimDebug.warn("[NATIVE] fail:", detail); } catch (e) {}
+        if (moviePlayerOpen) updateMoviePlayerStatus("Trình phát gốc iOS không mở được nguồn này — đang thử nguồn khác…");
+        // Phiên JVHD (live) → đóng đúng luồng JVHD, không dùng stopMoviePlayback thô.
+        if (jvhdPlayerSession) {
+            closeJvhdPlayback(true, describeMoviePlaybackUnavailable(detail));
+            return;
+        }
+        // Thử nguồn kế tiếp (web) — đúng thứ tự fallback sẵn có của app.js.
+        if (tryNextMovieStreamFallback()) return;
+        if (tryNextMovieTvFallbackStream()) return;
+        stopMoviePlayback();
+        showMovieStatus(describeMoviePlaybackUnavailable(detail), true);
+    };
+
+    // Người dùng ĐÓNG trình phát native (nút Done / vuốt) → dọn player web,
+    // quay lại lưới phim. KHÔNG tự phát lại bằng <video> (người dùng đã
+    // chủ động đóng).
+    window.__bintvNativePlaybackClosed = function (info) {
+        if (isStaleNativeCallback(info)) return;
+        movieNativeHandoffActive = false;
+        try { window.__phimDebug && window.__phimDebug.log("[NATIVE] người dùng đóng player"); } catch (e) {}
+        // Người dùng ĐÃ chủ động đóng trình phát native → KHÔNG tự phát lại
+        // bằng <video>. Dọn UI player web kể cả khi cờ moviePlayerOpen lệch
+        // (overlay còn class "show" / browser còn bị ẩn bởi "player-active").
+        var player = document.getElementById("bintv-movie-player");
+        var browser = document.getElementById("bintv-movie-browser");
+        var overlayShown = !!(player && player.classList.contains("show"));
+        if (moviePlayerOpen || overlayShown) { stopMoviePlayback(); return; }
+        if (browser) browser.classList.remove("player-active");
+    };
+
+    // Thông báo cuối cùng khi MỌI đường đều thất bại. Trên iOS KHÔNG dùng
+    // chữ "trên TV" (iPhone không phải TV; trước đây app rơi vào nhánh
+    // fallback TV nên hiện câu đó — chính là lỗi người dùng báo cáo).
+    function describeMoviePlaybackUnavailable(detail) {
+        if (isIosNativePlaybackBridge()) {
+            var base = "Không phát được nguồn phim này trên iPhone (đã thử trình phát gốc iOS và các nguồn dự phòng)";
+            return detail ? base + " — " + detail : base;
+        }
+        return "Không thể phát nguồn phim này trên TV";
+    }
+
     // [build 229] Thông báo RÕ NGUYÊN NHÂN khi không có nguồn phát được
     // (trước đây chỉ hiện chung chung "Không tìm thấy nguồn phát tương thích").
     function describeUnplayableStreams(classified) {
@@ -4870,10 +5200,18 @@
                 }
                 validStreams.push({ url: chosenUrl, name: chosen.name || "", title: chosen.title || "", raw: chosen.raw || null });
             }
+            // [BinTV iOS build 231] Phiên phát MỚI (phim/tập khác) → reset trần
+            // handoff và nhớ nguồn XẾP HẠNG CAO NHẤT: khi mọi nguồn web đều lỗi
+            // thì native sẽ thử đúng nguồn tốt nhất này (không phải nguồn cuối).
+            resetMovieNativeHandoff(true);
+            movieNativeSessionPrimaryUrl = validStreams.length ? String(validStreams[0].url || "") : "";
             if (type === "tv") {
                 var tvStreams = validStreams;
                 if (!tvStreams.length && subtitleContext && Array.isArray(subtitleContext._bintvTvValidatedStreams)) tvStreams = subtitleContext._bintvTvValidatedStreams;
                 if (!tvStreams.length) tvStreams = streams;
+                if (!movieNativeSessionPrimaryUrl && tvStreams.length) {
+                    movieNativeSessionPrimaryUrl = String((tvStreams[0] && tvStreams[0].url) || "");
+                }
                 if (startMovieTvPlaybackWithFallback(tvStreams, title || "Truyền hình", subtitleContext)) return;
                 moviePlayerEpisodeSwitchInProgress = false;
                 showMovieStatus(!validStreams.length ? describeUnplayableStreams(classified) : "Link truyền hình hiện không hoạt động", true);
@@ -5665,6 +6003,19 @@
             if (window.__phimDebug) window.__phimDebug.log("Trying next movie stream fallback");
             return;
         }
+        // =================================================================
+        // [BinTV iOS build 231] HẾT nguồn web → CHUYỂN SANG TRÌNH PHÁT GỐC
+        // CỦA iOS (AVPlayer) thay vì hiện lỗi "Không thể phát … trên TV".
+        // Nguồn thử = nguồn xếp hạng cao nhất của phiên (validStreams[0]).
+        // requestNativeMoviePlayback trả false trên Android/Tizen/Windows
+        // (không có message handler playVideoNative) → hành vi cũ giữ nguyên.
+        // Nếu native cũng fail, Swift gọi lại window.__bintvNativePlaybackFailed
+        // → thông báo THẬT ở dưới (không bao giờ im lặng giả vờ đang phát).
+        // =================================================================
+        if (requestNativeMoviePlayback("web-streams-exhausted",
+                                       movieNativeSessionPrimaryUrl || movieCurrentStreamUrl)) {
+            return;
+        }
         stopMoviePlayback();
         // [Phim standalone 2026-09] Hien thi thong bao ro rang hon neu da thu
         // tat ca cac stream nguon (thuong do key nguon sc.k-20.xyz het han).
@@ -5672,12 +6023,20 @@
             clearMovieStreamFallback();
             showMovieStatus("Nguồn phim tạm thời không khả dụng, vui lòng thử lại sau", true);
         } else {
-            showMovieStatus("Không thể phát nguồn phim này trên TV", true);
+            // [iOS build 231] iPhone KHÔNG phải TV: dùng thông báo đúng thiết bị
+            // (nội dung cũ "…trên TV" chỉ còn áp dụng cho Android/Tizen TV).
+            showMovieStatus(describeMoviePlaybackUnavailable(""), true);
         }
     }
 
     function startMoviePlayback(url, title, subtitleContext) {
         if (window.__phimDebug) window.__phimDebug.log("startMoviePlayback", { url: url, title: title, hasWebapis: !!(window.webapis && webapis.avplay) });
+        // [BinTV iOS build 231] MỖI lần phát = MỘT phiên mới: tăng session id
+        // để mọi callback từ trình phát native của LẦN PHÁT TRƯỚC (nếu còn
+        // bay về muộn) bị isStaleNativeCallback() loại bỏ — không bao giờ
+        // dọn UI hay đổi nguồn oan của lần phát hiện tại.
+        movieNativePlaybackSession += 1;
+        movieNativeHandoffActive = false;
         ensureMovieExperienceUI();
         moviePlayerOpen = true;
         moviePlayerPaused = false;
@@ -5719,7 +6078,31 @@
         clearMovieSubtitleRendering();
         updateMovieSubtitleButton("CC Vietsub: Tắt", false);
 
-        if (window.webapis && webapis.avplay) {
+        // =================================================================
+        // [BinTV iOS build 231] GHI NHỚ NGUỒN + PRE-FLIGHT HANDOFF
+        //  (1) Ghi lại streamUrl GỐC / URL đã bọc proxy / Referer / tiêu đề —
+        //      nhánh lỗi (handleMoviePlaybackError) cần đúng các giá trị này
+        //      để gửi sang Swift.
+        //  (2) Nếu nguồn là thứ WebKit KHÔNG giải mã được (container MKV/AVI/
+        //      FLV/WMV/RM/MPEG-PS, hoặc file progressive quảng cáo audio
+        //      AC3/EAC3/DTS/TrueHD) → chuyển THẲNG sang AVPlayer native,
+        //      không đốt thời gian chờ <video> fail rồi mới chữa. HLS vẫn để
+        //      web phát trước (WebKit phát HLS native rất tốt).
+        //  Trên Android/Tizen/Windows cả 2 hàm đều trả false → không đổi gì.
+        // =================================================================
+        rememberMovieStreamSource(url, title, subtitleContext && subtitleContext.stream);
+        if (iosNeedsNativePlayerFor(url, subtitleContext && subtitleContext.stream)) {
+            try {
+                window.__phimDebug && window.__phimDebug.log("[NATIVE] pre-flight handoff (container/codec WebKit không hỗ trợ):", String(url).substring(0, 140));
+            } catch (e) {}
+            if (requestNativeMoviePlayback("unsupported-source", url)) return;
+        }
+
+        // [BinTV iOS build 231] VÔ HIỆU HOÁ nhánh TV/EXTERNAL PLAYER (Tizen
+        // webapis.avplay — "phát trên TV") khi chạy trong WKWebView iOS:
+        // iPhone không có avplay, và nếu shim nào đó khai báo nhầm thì nhánh
+        // này sẽ cướp luồng phát rồi báo "Không thể phát trên TV".
+        if (window.webapis && webapis.avplay && !isIosWebViewRuntime()) {
             moviePlayerUsingAVPlay = true;
             try {
                 try { webapis.avplay.close(); } catch (closeError) {}
@@ -5878,6 +6261,16 @@
 
     function stopMoviePlayback(keepPlayerVisible, preserveTvFallback) {
         cancelMovieScrubInteraction(true);
+        // [BinTV iOS build 231] Player web bị ĐÓNG trong lúc trình phát native
+        // đang mở (vd người dùng bấm Back) → yêu cầu Swift đóng AVPlayer,
+        // không để player native "mồ côi" phủ trên UI. Cờ movieNativeHandoffActive
+        // được hạ TRƯỚC khi gọi nên callback onClosed từ Swift không gây vòng lặp.
+        if (!keepPlayerVisible && movieNativeHandoffActive) {
+            movieNativeHandoffActive = false;
+            try {
+                if (typeof window.__bintvStopVideoNative === "function") window.__bintvStopVideoNative();
+            } catch (e) {}
+        }
         if (!preserveTvFallback) clearMovieTvPlaybackFallback();
         movieSubtitleRequestToken++;
         closeMovieSubtitleMenu();
@@ -8694,7 +9087,15 @@
             return;
         }
         if (playNextJvhdFallback()) return;
-        closeJvhdPlayback(true, "Không thể phát video này trên TV");
+        // [BinTV iOS build 231] iPhone KHÔNG phải TV: thử TRÌNH PHÁT GỐC iOS
+        // (AVPlayer) trước khi đóng và báo lỗi. Trên Android/Tizen/Windows
+        // requestNativeMoviePlayback trả false → giữ nguyên hành vi cũ.
+        if (requestNativeMoviePlayback("jvhd-playback-error")) return;
+        // iOS: thông báo đúng thiết bị (đã thử trình phát gốc). Nền tảng khác:
+        // GIỮ NGUYÊN câu chữ cũ của bản Android/Tizen.
+        closeJvhdPlayback(true, isIosNativePlaybackBridge()
+            ? describeMoviePlaybackUnavailable("")
+            : "Không thể phát video này trên TV");
     }
 
     function restoreJvhdFocusAfterPlayer() {
