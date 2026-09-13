@@ -61,10 +61,14 @@ Nếu build thất bại:
 - `BinTV/Views/` — SwiftUI screens (Live TV, Player, Settings, Movies)
 - `BinTV/Models/` — Channel / Stream data models
 - `BinTV/Services/` — Network and stream loading
-- `BinTV/Player/` — AVPlayer management
+- `BinTV/Player/` — AVPlayer management (`AVPlayerManager.swift` cho LIVE TV,
+  `PhimNativePlayerController.swift` = trình phát gốc iOS của tab PHIM, nhận
+  `streamUrl` từ web app qua message handler `playVideoNative`)
 - `BinTV/Subtitle/` — WebVTT subtitle loader
 - `BinTV/Storage/` — UserDefaults preferences
 - `BinTV/Assets.xcassets/` — App icons from BinTV.png
+- `tests/ios-native-handoff/` — test jsdom cho luồng JS(WKWebView) → Swift(AVPlayer)
+  của tab PHIM (`npm install && node run.js`, không cần Xcode/iPhone)
 - `.github/workflows/build-ipa.yml` — CI pipeline
 
 ## Note
@@ -375,3 +379,71 @@ comment). Guard tự kiểm chứng bằng cách giả lập xoá 1 hàm.
   **đúng nguyên nhân** (torrent cần debrid / YouTube / mở ngoài) thay vì chung chung.
 - Kiểm chứng: `node tests/mock-e2e/run_all.js` → T1–T5 **579/579**;
   `node tests/stremio-e2e/run.js` (dữ liệu thật) → **44/44** (có trong T6 của run_all).
+
+### Build 231 (2.5.1) — iPhone hết lỗi "Không thể phát trên TV": phim đi qua TRÌNH PHÁT GỐC iOS
+
+**Triệu chứng (máy thật):** mở tab PHIM thì lưới thẻ phim hiển thị bình thường, nhưng
+bấm vào thẻ để xem → hiện **"Không thể phát nguồn phim này trên TV"** và video không
+khởi chạy. Cùng nguồn đó, bản Android/Windows/Tizen TV phát bình thường.
+
+**Root cause:** tab PHIM phát bằng thẻ `<video>` HTML5 trong WKWebView. Nhiều nguồn
+Stremio addon (vnstream, viptorrent, vimo, sc.k-20…) trả về **container MKV** hoặc
+**audio AC3/EAC3/DTS** — WebKit KHÔNG giải mã được → `video.onerror` → app.js thử hết
+mọi nguồn dự phòng (cũng cùng loại) → rơi vào **nhánh fallback dành cho TV/player
+ngoài** của bản Android/Tizen và in ra câu "…trên TV". Trên iPhone không tồn tại
+`webapis.avplay` nên nhánh đó KHÔNG phát gì cả: chỉ có thông báo lỗi.
+
+**Cách sửa (4 lớp, không né nguồn, không đổi URL gốc, không phá bản Android/Tizen):**
+
+1. **`BinTV/Player/PhimNativePlayerController.swift` (MỚI)** — trình phát GỐC của iOS
+   cho tab PHIM: nhận `streamUrl`, mở `AVPlayerViewController` (cùng loại player với
+   LIVE TV/TUBE, có điều khiển chuẩn, AirPlay, PiP, fullscreen). Mỗi nguồn có **2 ứng
+   viên** thử lần lượt trên cùng một player (không nhấp nháy): `direct` (URL gốc —
+   AVPlayer tự gửi Range) và `proxy` (qua `PhimLocalServer` — forward Referer/UA, DoH,
+   RawHttp cho `http://`). HLS → thử proxy trước (playlist đã được rewrite); file
+   progressive → thử direct trước (proxy phải tải hết file mới trả lời). Hết ứng viên
+   → báo JS + tự đóng, KHÔNG giả vờ đang phát.
+2. **`BinTV/Phim/PhimWebView.swift`** — đăng ký `WKScriptMessageHandler`
+   **`playVideoNative`**; user script mới `nativeHandoffJS` (document-start) cung cấp
+   `window.__bintvPlayVideoNative/…StopVideoNative` và **bắt sự kiện người dùng CLICK
+   thẻ phim** (ghi id + tên phim làm tiêu đề); kết quả phát (started/failed/closed)
+   trả về JS bằng `evaluateJavaScript` (payload JSON-hoá, kèm `session` chống race).
+   `allowsInlineMediaPlayback = true` + `mediaTypesRequiringUserActionForPlayback = []`
+   giữ nguyên (điều kiện cần cho cả đường web lẫn native).
+3. **`BinTV/Phim/Web/assets/app.js`** — **vô hiệu hoá nhánh TV/external player khi chạy
+   trên iOS WKWebView** (`webapis.avplay` bị chặn có chủ đích), và thay nhánh
+   "Không thể phát … trên TV" bằng **handoff sang native**:
+   • *pre-flight*: nguồn là MKV/AVI/FLV/WMV/RMVB/DIVX/MPG, hoặc file progressive quảng
+   cáo AC3/EAC3/DTS/TrueHD/Atmos → chuyển thẳng sang AVPlayer, không đốt thời gian chờ
+   `<video>` fail (HLS vẫn để web phát trước vì WebKit phát HLS rất tốt);
+   • *error path*: `<video>` lỗi → thử hết nguồn dự phòng web → đưa **nguồn xếp hạng
+   cao nhất** sang native → native fail thì thử tiếp nguồn web kế tiếp → chỉ khi MỌI
+   đường đều thua mới hiện thông báo **đúng thiết bị** ("…không phát được trên iPhone…",
+   không còn chữ "trên TV").
+   Trần 3 lần handoff/phiên + mỗi URL chỉ gửi 1 lần → không có vòng lặp JS ↔ native.
+4. **`BinTV/Phim/Web/assets/phim_ios_fallback.js`** — thêm bậc leo thang cuối: src
+   `/proxy` fail + src direct cũng fail (lần lỗi thứ 2 trên cùng src) → gọi
+   `window.__bintvRequestNativePlayback("ios-fallback-error")` và chặn propagation để
+   app.js không đổi src giữa chừng. **`BinTV/Info.plist`** — thêm
+   `NSAppTransportSecurity → NSAllowsArbitraryLoads = true` để `PhimLocalServer`
+   (URLSession/RawHttp) và AVPlayer tải được link `http://` (rất phổ biến ở CDN VN);
+   giữ nguyên `NSAllowsLocalNetworking` + 2 `NSExceptionDomains` cũ.
+
+**Không ảnh hưởng nền tảng khác:** mọi nhánh mới đều khoá bằng
+`window.webkit.messageHandlers.playVideoNative` (chỉ tồn tại trong WKWebView iOS).
+Android/Tizen/Windows không có handler → các hàm trả `false` → hành vi cũ nguyên vẹn
+(có test khẳng định điều này).
+
+**Kiểm chứng (không cần Xcode/iPhone):** `cd tests/ios-native-handoff && npm install && node run.js`
+→ **72/72 PASS**. Test nạp `index.html` + toàn bộ assets + **đúng các user script trích
+từ `PhimWebView.swift`** trong jsdom, stub `playVideoNative`, rồi kiểm: payload
+`{url,title,proxyUrl,referer,reason,session}`, trích URL gốc từ src `/proxy`, bắt click
+thẻ phim, chống gửi lặp, callback lệch session bị loại, thông báo hết chữ "trên TV",
+dọn UI khi đóng player, bảng phân loại container/codec (trích hàm THẬT từ app.js) và
+hành vi khi không có cầu nối.
+
+**Giới hạn ghi rõ (không hứa suông):** AVFoundation giải mã rộng hơn WebKit (HLS/MP4/MOV,
+AC3/EAC3) nhưng **vẫn không mở được Matroska** — nếu addon CHỈ có `.mkv` progressive thì
+native cũng báo lỗi thật và app.js thử nguồn kế tiếp; đường đúng cho trường hợp đó là
+addon trả HLS/MP4 (hoặc debrid). Phụ đề do app.js render bằng DOM nên **không hiển thị
+trong player native** (player native dùng phụ đề nhúng trong stream nếu có).

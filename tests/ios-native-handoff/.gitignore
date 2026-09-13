@@ -1,0 +1,4 @@
+# Chỉ giữ source test trong Git — KHÔNG commit dependency/artifact.
+node_modules/
+package-lock.json
+npm-debug.log*

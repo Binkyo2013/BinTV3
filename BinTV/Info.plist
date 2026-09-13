@@ -17,19 +17,32 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>2.5.0</string>
+	<string>2.5.1</string>
 	<key>CFBundleSignature</key>
 	<string>????</string>
 	<key>CFBundleVersion</key>
-	<string>230</string>
+	<string>231</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
 	<key>UIFileSharingEnabled</key>
 	<true/>
+	<!-- [build 231 — 2026-09-13] MỞ ATS CHO TẢI HTTP/HTTPS.
+	     Lý do: nguồn phim từ Stremio addon (vnstream/viptorrent/vimo/sc.k-20…)
+	     rất thường là link http:// (CDN VN/Asia). ATS mặc định CHẶN mọi
+	     request cleartext của framework Apple — gồm cả PhimLocalServer.swift
+	     (URLSession/RawHttp) và AVPlayer khi phát streamUrl trực tiếp
+	     (BinTV/Player/PhimNativePlayerController.swift) → video không khởi
+	     chạy. NSAllowsArbitraryLoads=true mở cả http lẫn https cho toàn app
+	     (app sideload TrollStore, không qua App Store review).
+	     GIỮ LẠI NSAllowsLocalNetworking + NSExceptionDomains cũ: chúng vô hại
+	     khi arbitrary loads bật, và nếu sau này siết ATS lại thì cấu hình
+	     chi tiết cho server nội bộ (127.0.0.1) và 2 host đã biết vẫn còn. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 		<key>NSExceptionDomains</key>

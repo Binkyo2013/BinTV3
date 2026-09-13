@@ -31,6 +31,16 @@
  *   6. stopImmediatePropagation CHỈ khi thực sự swap sang direct (để
  *      app.js không stopMoviePlayback giữa chừng lần retry); mọi error
  *      khác propagation bình thường như bản gốc.
+ *   7. [build 231 — 2026-09-13] LEO THANG CUỐI: src proxy fail + src direct
+ *      cũng fail (cùng 1 src, lần error thứ 2) → gọi
+ *      window.__bintvRequestNativePlayback("ios-fallback-error") — app.js
+ *      gửi streamUrl sang Swift qua WKScriptMessageHandler `playVideoNative`
+ *      để mở AVPlayerViewController (BinTV/Player/PhimNativePlayerController.swift).
+ *      Đây là chỗ thay thế nhánh fallback "Không thể phát … trên TV" trên
+ *      iPhone. Mỗi src chỉ handoff 1 lần (cờ __iosNativeTriedFor, reset khi
+ *      'emptied'); khi đã handoff thì stopImmediatePropagation để app.js
+ *      không đổi src giữa chừng. KHÔNG có handler (Android/Tizen/Windows)
+ *      → trả về false → hành vi cũ giữ nguyên 100%.
  */
 (function () {
     "use strict";
@@ -67,11 +77,13 @@
         var video = document.getElementById("bintv-movie-html5-player");
         if (!video) return;
         video.__iosFallbackTriedFor = "";
+        video.__iosNativeTriedFor = "";
 
         // startMoviePlayback/stopMoviePlayback gọi load() → 'emptied'
         // → reset cờ retry (mở phim mới / episode mới được phép retry lại).
         video.addEventListener("emptied", function () {
             video.__iosFallbackTriedFor = "";
+            video.__iosNativeTriedFor = "";
         });
 
         // Chẩn đoán trạng thái mạng của media element (proxy chậm/trở
@@ -90,7 +102,37 @@
                 log("error", { code: err && err.code, msg: err && err.message, src: src.substring(0, 200) });
 
                 // Đã retry src này (trước đó) → không lặp lại.
-                if (video.__iosFallbackTriedFor === src) return;
+                if (video.__iosFallbackTriedFor === src) {
+                    // =====================================================
+                    // [BinTV build 231 — 2026-09-13] LEO THANG CUỐI CÙNG:
+                    // proxy fail → direct cũng fail = WebKit KHÔNG phát được
+                    // nguồn này (thường do container MKV / audio AC3/EAC3/DTS).
+                    // Trước đây app.js rơi vào nhánh fallback TV và hiện
+                    // "Không thể phát nguồn phim này trên TV". Nay chuyển
+                    // streamUrl sang Swift (WKScriptMessageHandler
+                    // `playVideoNative`) để mở AVPlayerViewController —
+                    // trình phát GỐC của iOS, engine AVFoundation giải mã
+                    // rộng hơn HTML5 của WebKit.
+                    // `window.__bintvRequestNativePlayback` do app.js expose;
+                    // chỉ tồn tại trong WKWebView iOS → Android KHÔNG ảnh hưởng.
+                    // =====================================================
+                    if (video.__iosNativeTriedFor !== src) {
+                        video.__iosNativeTriedFor = src;
+                        var handedOff = false;
+                        try {
+                            handedOff = (typeof window.__bintvRequestNativePlayback === "function")
+                                && window.__bintvRequestNativePlayback("ios-fallback-error") === true;
+                        } catch (nativeError) { handedOff = false; }
+                        log("src failed twice → native handoff:", handedOff ? "SENT" : "unavailable");
+                        if (handedOff && event && typeof event.stopImmediatePropagation === "function") {
+                            // Chặn app.js onerror cho event NÀY: tránh app.js
+                            // chạy tiếp fallback web (đổi src) trong lúc
+                            // AVPlayer native đang mở chính nguồn đó.
+                            event.stopImmediatePropagation();
+                        }
+                    }
+                    return;
+                }
                 var original = decodeProxyOriginal(src);
                 if (!original) return; // không phải route proxy → app.js xử lý
 
