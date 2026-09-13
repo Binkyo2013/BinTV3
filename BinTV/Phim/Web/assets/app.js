@@ -4925,6 +4925,38 @@
     };
 
     // -----------------------------------------------------------------
+    // [BinTV iOS build 232] PHỤ ĐỀ TRONG TRÌNH PHÁT NATIVE
+    // app.js đã parse SRT/VTT thành movieSubtitleCues. Khi trình phát
+    // native đang chạy (movieNativeHandoffActive), phụ đề DOM không hiển
+    // thị (AVPlayerViewController là lớp phủ của hệ thống) — nên đẩy danh
+    // sách cue sang Swift để hiển thị đồng bộ trên chính player native.
+    // Trả false trên Android/Tizen/Windows (không có cầu nối) = hành vi cũ.
+    // -----------------------------------------------------------------
+    function pushMovieSubtitlesToNative(cues, label) {
+        if (!isIosNativePlaybackBridge() || !movieNativeHandoffActive) return false;
+        try {
+            if (typeof window.__bintvSetNativeSubtitles !== "function") return false;
+        } catch (e) { return false; }
+        var compact = [];
+        var list = Array.isArray(cues) ? cues : [];
+        for (var i = 0; i < list.length; i++) {
+            var c = list[i];
+            if (!c || typeof c.start !== "number" || typeof c.end !== "number" || !c.text) continue;
+            compact.push({ s: c.start, e: c.end, t: String(c.text) });
+        }
+        try {
+            window.__bintvSetNativeSubtitles({
+                label: String(label || ""),
+                cues: compact,
+                session: String(movieNativePlaybackSession)
+            });
+            return true;
+        } catch (e2) { return false; }
+    }
+    // Hook cho test jsdom (tests/ios-native-handoff) kiểm tra luồng phụ đề.
+    window.__bintvPushNativeSubtitles = pushMovieSubtitlesToNative;
+
+    // -----------------------------------------------------------------
     // CALLBACK TỪ SWIFT (PhimWebView.evaluateJavaScript) — kèm `session`
     // để loại bỏ callback cũ của phiên phát trước.
     // -----------------------------------------------------------------
@@ -4941,6 +4973,12 @@
     window.__bintvNativePlaybackStarted = function (info) {
         if (isStaleNativeCallback(info)) return;
         movieNativeHandoffActive = true;
+        // [build 232] Đang bật Vietsub từ trước → đẩy cue sang player native.
+        if (movieSubtitleActiveIndex >= 0 && movieSubtitleCues.length > 0) {
+            var opt = movieSubtitleOptions[movieSubtitleActiveIndex];
+            pushMovieSubtitlesToNative(movieSubtitleCues,
+                (opt && opt._bintvSourceName) || movieSubtitleActiveSource);
+        }
         try { window.__phimDebug && window.__phimDebug.log("[NATIVE] phát thành công", info && info.title); } catch (e) {}
         if (moviePlayerOpen) updateMoviePlayerStatus("Đang phát (trình phát gốc iOS)");
     };
@@ -5509,6 +5547,8 @@
         }
         movieSubtitleActiveIndex = -1;
         clearMovieSubtitleRendering();
+        // [build 232] Tắt Vietsub → gỡ phụ đề khỏi player native (cues rỗng).
+        if (movieNativeHandoffActive) pushMovieSubtitlesToNative([], "");
         updateMovieSubtitleButton("CC Vietsub: Tắt", false);
     }
 
@@ -5544,6 +5584,12 @@
             movieSubtitleTimer = setInterval(renderCurrentMovieSubtitle, 250);
             renderCurrentMovieSubtitle();
             updateMovieSubtitleButton("CC Vietsub: Bật · " + (option._bintvSourceName || movieSubtitleActiveSource), true);
+            // [build 232] Nếu đang phát bằng trình phát native → đẩy cue sang
+            // Swift (phụ đề DOM bị AVPlayerViewController che khuất).
+            if (movieNativeHandoffActive) {
+                pushMovieSubtitlesToNative(movieSubtitleCues,
+                    (option._bintvSourceName || movieSubtitleActiveSource));
+            }
         }, function () { if (moviePlayerOpen && !movieSubtitleUserDisabled && movieSubtitleEnableRequested) updateMovieSubtitleButton("CC Vietsub: Lỗi tải", false); });
     }
 

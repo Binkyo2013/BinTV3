@@ -820,6 +820,25 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
             } catch (e) { return false; }
         };
 
+        // Gửi phụ đề (đã parse SRT/VTT) sang Swift để hiển thị trên trình
+        // phát native — payload { action:"subtitles", label, cues:[{s,e,t}],
+        // session }. `cues` rỗng = tắt phụ đề trong player native.
+        window.__bintvSetNativeSubtitles = function (payload) {
+            var bridge = handler();
+            if (!bridge) { return false; }
+            try {
+                var body = payload || {};
+                var cues = Array.isArray(body.cues) ? body.cues : [];
+                bridge.postMessage({
+                    action: "subtitles",
+                    label: text(body.label),
+                    cues: cues,
+                    session: text(body.session)
+                });
+                return true;
+            } catch (e) { return false; }
+        };
+
         // -----------------------------------------------------------------
         // Bắt sự kiện người dùng CLICK (hoặc ENTER/SPACE) vào thẻ phim.
         // Capture phase trên document → chạy trước listener của app.js và
@@ -932,6 +951,12 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         let action = text("action")
         let url = text("url", "streamUrl", "streamURL", "src")
         let proxyURL = text("proxyUrl", "proxyURL", "proxy")
+        // [build 232] Cập nhật phụ đề cho trình phát native đang chạy —
+        // action = "subtitles", không có url (đừng nhầm với lệnh stop).
+        if action == "subtitles" {
+            handleNativeSubtitles(dict)
+            return
+        }
         // Không có URL (hoặc yêu cầu dừng tường minh) → đóng player native.
         if action == "stop" || action == "close" || (url.isEmpty && proxyURL.isEmpty) {
             PhimDebugLog.step("BRIDGE", "playVideoNative", "stop",
@@ -957,6 +982,43 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
                           + "proxy=\(PhimDebugLog.sanitizeURL(request.proxyURL))")
         let play: () -> Void = { [weak self] in self?.nativePlayer.play(request) }
         if Thread.isMainThread { play() } else { DispatchQueue.main.async(execute: play) }
+    }
+
+    /// Xử lý message `playVideoNative` dạng {action:"subtitles", label, cues,
+    /// session} — app.js gửi khi bật/tắt Vietsub trong lúc trình phát native
+    /// đang chạy. Cues là mảng {s,e,t} (giây) đã parse từ SRT/VTT phía JS.
+    private func handleNativeSubtitles(_ dict: [String: Any]) {
+        let session = (dict["session"] as? String) ?? ""
+        let label = (dict["label"] as? String) ?? ""
+        var cues: [NativeSubtitleCue] = []
+        if let rawCues = dict["cues"] as? [[String: Any]] {
+            for raw in rawCues {
+                guard let start = Self.cueTime(raw["s"] ?? raw["start"]),
+                      let end = Self.cueTime(raw["e"] ?? raw["end"]),
+                      let text = Self.cueText(raw["t"] ?? raw["text"]) else { continue }
+                cues.append(NativeSubtitleCue(start: start, end: end, text: text))
+            }
+        }
+        PhimDebugLog.step("BRIDGE", "playVideoNative", "subtitles",
+                          "label=\(label) count=\(cues.count) session=\(session.isEmpty ? "-" : session)")
+        let update: () -> Void = { [weak self] in
+            self?.nativePlayer.updateSubtitles(cues, label: label, session: session)
+        }
+        if Thread.isMainThread { update() } else { DispatchQueue.main.async(execute: update) }
+    }
+
+    /// Đọc số giây từ payload JSON (NSNumber từ JSONSerialization, hoặc chuỗi).
+    private static func cueTime(_ value: Any?) -> TimeInterval? {
+        if let number = value as? NSNumber { return number.doubleValue }
+        if let string = value as? String { return TimeInterval(string) }
+        return nil
+    }
+
+    /// Đọc text cue (bỏ khoảng trắng 2 đầu; rỗng → nil).
+    private static func cueText(_ value: Any?) -> String? {
+        guard let string = value as? String else { return nil }
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {

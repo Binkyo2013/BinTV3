@@ -344,9 +344,91 @@ function suiteB() {
     check("B", "same-origin → '' (không bọc)", T.buildProxiedStreamUrl("http://127.0.0.1:3000/proxy?url=x", "") === "");
 }
 
+// =====================================================================
+// SUITE C — PHỤ ĐỀ TRONG TRÌNH PHÁT NATIVE (build 232)
+// =====================================================================
+function suiteC() {
+    console.log("\n=== SUITE C: phụ đề đẩy sang trình phát native ===");
+    const win = makeWindow("http://127.0.0.1:3000/?android=phone&ios=landscape", true);
+    bootWebApp(win, scriptList(false));
+
+    // Cầu nối Swift phải cung cấp __bintvSetNativeSubtitles.
+    check("C", "nativeHandoffJS có __bintvSetNativeSubtitles",
+          typeof win.__bintvSetNativeSubtitles === "function");
+    check("C", "app.js expose __bintvPushNativeSubtitles",
+          typeof win.__bintvPushNativeSubtitles === "function");
+
+    // Chưa handoff → không đẩy (không gửi message).
+    win.__posted.length = 0;
+    check("C", "chưa handoff → push = false",
+          win.__bintvPushNativeSubtitles([{ start: 0, end: 2, text: "x" }], "Vietsub") === false);
+    check("C", "không gửi message khi chưa handoff", win.__posted.length === 0);
+
+    // Handoff một nguồn → native active.
+    win.__posted.length = 0;
+    const video = win.document.getElementById("bintv-movie-html5-player");
+    video.src = "http://127.0.0.1:3000/proxy?url=" + encodeURIComponent("https://cdn.example.com/a.mkv");
+    check("C", "handoff thành công", win.__bintvRequestNativePlayback("unsupported-source") === true);
+    const handoffMsg = win.__posted[0] || {};
+    const session = handoffMsg.session;
+
+    // Đẩy phụ đề sau khi native active.
+    win.__posted.length = 0;
+    const pushed = win.__bintvPushNativeSubtitles([
+        { start: 0.5, end: 2.5, text: "Xin chào" },
+        { start: 3, end: 5, text: "Tạm biệt" }
+    ], "Vietsub · OpenSubtitles");
+    check("C", "push phụ đề trả true", pushed === true);
+    check("C", "gửi đúng 1 message", win.__posted.length === 1, String(win.__posted.length));
+    const sub = win.__posted[0] || {};
+    check("C", "message có action=subtitles", sub.action === "subtitles", JSON.stringify(sub));
+    check("C", "label đúng", sub.label === "Vietsub · OpenSubtitles", sub.label);
+    check("C", "session khớp phiên handoff", sub.session === session, sub.session);
+    check("C", "cues compact {s,e,t} đúng", Array.isArray(sub.cues) && sub.cues.length === 2
+          && sub.cues[0].s === 0.5 && sub.cues[0].e === 2.5 && sub.cues[0].t === "Xin chào"
+          && sub.cues[1].t === "Tạm biệt", JSON.stringify(sub.cues));
+
+    // Tắt phụ đề → gửi cues rỗng.
+    win.__posted.length = 0;
+    win.__bintvPushNativeSubtitles([], "");
+    check("C", "tắt phụ đề → cues rỗng", win.__posted.length === 1
+          && Array.isArray(win.__posted[0].cues) && win.__posted[0].cues.length === 0,
+          JSON.stringify(win.__posted));
+
+    // Native đóng → handoffActive=false → không đẩy nữa.
+    win.__bintvNativePlaybackClosed({ session: session });
+    win.__posted.length = 0;
+    check("C", "sau khi đóng → push = false",
+          win.__bintvPushNativeSubtitles([{ start: 0, end: 1, text: "z" }], "") === false);
+
+    // Không có cầu nối → luôn false.
+    const win2 = makeWindow("http://127.0.0.1:3000/?android=phone", false);
+    bootWebApp(win2, scriptList(false));
+    check("C", "không bridge → __bintvSetNativeSubtitles trả false",
+          win2.__bintvSetNativeSubtitles({ label: "", cues: [], session: "" }) === false);
+
+    // Wiring trong app.js: định nghĩa + hook + ≥2 điểm gọi (started/apply/disable).
+    const appSrc = fs.readFileSync(path.join(ASSETS, "app.js"), "utf8");
+    const count = (appSrc.match(/pushMovieSubtitlesToNative/g) || []).length;
+    check("C", "app.js có định nghĩa + ≥2 điểm gọi pushMovieSubtitlesToNative",
+          count >= 3, "count=" + count);
+
+    // Wiring trong Swift.
+    const swiftSrc = fs.readFileSync(SWIFT_WEBVIEW, "utf8");
+    check("C", "Swift xử lý action=subtitles", /action == "subtitles"/.test(swiftSrc));
+    check("C", "Swift gọi updateSubtitles", /updateSubtitles\(/.test(swiftSrc));
+    const playerSrc = fs.readFileSync(
+        path.join(REPO, "BinTV", "Player", "PhimNativePlayerController.swift"), "utf8");
+    check("C", "player native có NativeSubtitleCue + updateSubtitles",
+          /struct NativeSubtitleCue/.test(playerSrc) && /func updateSubtitles/.test(playerSrc));
+    check("C", "player native treo phụ đề trên contentOverlayView",
+          /contentOverlayView/.test(playerSrc));
+}
+
 // ---------------------------------------------------------------------
 suiteA();
 suiteB();
+suiteC();
 console.log("\n=========================================");
 console.log("PASS: " + pass + "   FAIL: " + fail);
 if (fail) {
