@@ -265,6 +265,25 @@
     // Nguồn XẾP HẠNG CAO NHẤT của phiên phát hiện tại (validStreams[0]) —
     // khi mọi nguồn web đều lỗi thì native thử nguồn tốt nhất này.
     var movieNativeSessionPrimaryUrl = "";
+    // =================================================================
+    // [BinTV iOS build 233 — 2026-09-14] LUỒNG KẾT THÚC PHÁT (phim bộ/lẻ)
+    //   • Phim BỘ: tập phát hết → tự động chuyển sang tập tiếp theo; người
+    //     dùng đóng trình phát → quay về giao diện CHỌN TẬP.
+    //   • Phim LẺ: phát hết hoặc đóng trình phát → quay về giao diện PHIM.
+    //   • Trình phát native (AVPlayerViewController) KHÔNG được treo: hết
+    //     tập là phải chuyển hoặc đóng (Swift có backstop tự đóng khi JS
+    //     im lặng — xem PhimNativePlayerController.swift).
+    // moviePreferNativePlayer: native ĐANG là player hiển thị → mọi lần
+    // phát TIẾP THEO của cùng phim (tự chuyển tập / đổi tập trong menu /
+    // nguồn dự phòng) phải TIẾP TỤC chạy trong native — thẻ <video> nằm
+    // SAU AVPlayerViewController nên nếu nó phát thì người dùng chỉ nghe
+    // tiếng mà không thấy hình. Reset khi player đóng hẳn / native fail.
+    var moviePreferNativePlayer = false;
+    // Serial của lần CHUYỂN TẬP trong player (đổi tập tay / tự next-tập).
+    // Lần chuyển tập đang nạp nguồn bị VÔ HIỆU khi: (a) người dùng đóng hẳn
+    // player, (b) người dùng chọn phim / tập khác — chống player (kể cả
+    // native) tự BẬT LẠI sau khi người dùng đã đóng (race mạng chậm).
+    var movieEpisodeSwitchSerial = 0;
     var movieBootstrapRequestInFlight = null;
     var movieBootstrapCache = null;
     var moviePrefetchTimer = null;
@@ -4548,6 +4567,7 @@
 
     function openMovieItem(item) {
         if (!item || !item.id || !item.type) return;
+        movieEpisodeSwitchSerial += 1;   // [build 233] ý định phát MỚI → vô hiệu mọi chuyển tập đang chờ
         if (item.type === "tv") {
             movieEpisodes = [];
             movieCurrentEpisodeIndex = -1;
@@ -4631,6 +4651,7 @@
         var episode = movieEpisodes[movieEpisodeIndex];
         if (!episode || !episode.id) return;
         movieCurrentEpisodeIndex = movieEpisodeIndex;
+        movieEpisodeSwitchSerial += 1;   // [build 233] chọn tập mới từ picker → vô hiệu chuyển tập đang chờ
         closeMovieEpisodes();
         var subtitleContext = {
             id: movieEpisodeMeta && movieEpisodeMeta.id ? movieEpisodeMeta.id : episode.id,
@@ -4909,6 +4930,10 @@
         movieNativeHandoffUrls[url] = true;
         movieNativeHandoffCount += 1;
         movieNativeHandoffActive = true;
+        // [build 233] Native giờ là player ĐANG HIỂN THỊ → các lần phát kế
+        // tiếp của cùng phim (tự chuyển tập / đổi tập / nguồn dự phòng) phải
+        // tiếp tục đi qua native (đóng hẳn player mới hạ cờ này).
+        moviePreferNativePlayer = true;
         movieCurrentStreamUrl = url;
         movieCurrentStreamProxyUrl = proxyUrl;
         movieCurrentStreamReferer = referer;
@@ -4997,6 +5022,7 @@
     window.__bintvNativePlaybackFailed = function (info) {
         if (isStaleNativeCallback(info)) return;
         movieNativeHandoffActive = false;
+        moviePreferNativePlayer = false;   // [build 233] native đã tự đóng
         var detail = String((info && info.message) || "");
         try { window.__phimDebug && window.__phimDebug.warn("[NATIVE] fail:", detail); } catch (e) {}
         if (moviePlayerOpen) updateMoviePlayerStatus("Trình phát gốc iOS không mở được nguồn này — đang thử nguồn khác…");
@@ -5018,6 +5044,7 @@
     window.__bintvNativePlaybackClosed = function (info) {
         if (isStaleNativeCallback(info)) return;
         movieNativeHandoffActive = false;
+        moviePreferNativePlayer = false;   // [build 233]
         try { window.__phimDebug && window.__phimDebug.log("[NATIVE] người dùng đóng player"); } catch (e) {}
         // Người dùng ĐÃ chủ động đóng trình phát native → KHÔNG tự phát lại
         // bằng <video>. Dọn UI player web kể cả khi cờ moviePlayerOpen lệch
@@ -5025,8 +5052,37 @@
         var player = document.getElementById("bintv-movie-player");
         var browser = document.getElementById("bintv-movie-browser");
         var overlayShown = !!(player && player.classList.contains("show"));
-        if (moviePlayerOpen || overlayShown) { stopMoviePlayback(); return; }
-        if (browser) browser.classList.remove("player-active");
+        if (moviePlayerOpen || overlayShown) { stopMoviePlayback(); }
+        else if (browser) browser.classList.remove("player-active");
+        // [build 233] PHIM BỘ: đóng trình phát → quay về giao diện CHỌN TẬP
+        // (phim lẻ: reopenMovieEpisodePicker tự no-op → về lưới PHIM như cũ).
+        reopenMovieEpisodePicker();
+    };
+
+    // -----------------------------------------------------------------
+    // [BinTV iOS build 233] Native phát HẾT tập/phim (DidPlayToEndTime) →
+    // JS quyết định: phim BỘ còn tập → báo native GIỮ player (prepareNext)
+    // rồi tự chuyển tập; hết tập / phim LẺ → yêu cầu native đóng NGAY
+    // (stopMoviePlayback gửi action "stop") và quay về đúng giao diện.
+    // Swift có backstop tự đóng nếu JS im lặng — không bao giờ treo player.
+    // -----------------------------------------------------------------
+    window.__bintvNativePlaybackEnded = function (info) {
+        if (isStaleNativeCallback(info)) return;
+        try { window.__phimDebug && window.__phimDebug.log("[NATIVE] phát hết tập/phim"); } catch (e) {}
+        // JVHD (live/quảng cáo) có luồng kết thúc riêng — đóng native theo
+        // đúng nghiệp vụ JVHD (closeJvhdPlayback → stopMoviePlayback gửi stop).
+        if (jvhdPlayerSession) { handleJvhdPlaybackCompleted(); return; }
+        var isSeries = !!(movieEpisodes && movieEpisodes.length > 0 && movieEpisodeType === "series");
+        if (isSeries && canPlayNextMovieEpisode() && !moviePlayerEpisodeSwitchInProgress) {
+            // Còn TẬP TIẾP THEO: báo native giữ player mở trong lúc nạp nguồn
+            // (backstop Swift nới lên 45s — kẹt mạng vẫn tự đóng, không treo).
+            try { if (typeof window.__bintvPrepareNextNativeEpisode === "function") window.__bintvPrepareNextNativeEpisode(); } catch (e) {}
+            if (playNextMovieEpisode("native-ended")) return;
+        }
+        // HẾT TẬP (phim bộ) hoặc PHIM LẺ: đóng trình phát ngay…
+        stopMoviePlayback();   // (handoffActive còn true → gửi "stop" cho native)
+        // …rồi quay về đúng giao diện: phim BỘ → CHỌN TẬP; phim LẺ → PHIM.
+        if (isSeries) reopenMovieEpisodePicker();
     };
 
     // Thông báo cuối cùng khi MỌI đường đều thất bại. Trên iOS KHÔNG dùng
@@ -5212,9 +5268,17 @@
         }
     }
 
-    function loadMovieStreams(type, id, title, subtitleContext) {
+    // [build 233] `abortGuard` (tuỳ chọn): hàm trả false → lần nạp này đã bị
+    // VÔ HIỆU (người dùng đóng player / chọn phim khác trong lúc chờ addon) →
+    // BỎ QUA kết quả, không mở player. Chỉ dùng cho chuyển tập trong player.
+    function loadMovieStreams(type, id, title, subtitleContext, abortGuard) {
         showMovieStatus("Đang tìm nguồn phát…", false);
         fetchMovieStreamsShared(type, id, function (streams) {
+            if (abortGuard && !abortGuard()) {
+                moviePlayerEpisodeSwitchInProgress = false;
+                try { window.__phimDebug && window.__phimDebug.log("[PLAYER] bỏ qua nguồn: lần chuyển tập đã bị huỷ (người dùng đã đóng/chọn khác)"); } catch (e) {}
+                return;
+            }
             if (!subtitleContext) subtitleContext = { id: id, videoId: id, type: type, name: title || "Phim" };
             // [build 229] PHÂN LOẠI theo chuẩn Stremio: url (HLS/MP4) · ytId ·
             // infoHash (torrent) · externalUrl + headers (Referer…). Chỉ những
@@ -5290,7 +5354,15 @@
             startMoviePlayback(selected.url, title || selected.title || selected.name || "Phim", subtitleContext);
         }, function (error) {
             moviePlayerEpisodeSwitchInProgress = false;
+            if (abortGuard && !abortGuard()) return;   // [build 233] đã bị huỷ
             var message = getMovieRequestErrorMessage("Không thể tải nguồn phát", error);
+            // [build 233] Đang xem bằng player NATIVE → kéo nó xuống ngay để
+            // người dùng thấy thông báo lỗi trong UI web (thay vì nhìn khung
+            // hình cuối vô định cho tới khi backstop 45s của Swift tự đóng).
+            if (movieNativeHandoffActive) {
+                movieNativeHandoffActive = false;
+                try { if (typeof window.__bintvStopVideoNative === "function") window.__bintvStopVideoNative(); } catch (stopNativeError) {}
+            }
             if (moviePlayerOpen) updateMoviePlayerStatus(message);
             else showMovieStatus(message, true);
         });
@@ -6000,10 +6072,117 @@
             season: episode.season,
             episode: episode.episode
         };
+        // [build 233] Khoá lần chuyển tập này bằng serial: người dùng đóng
+        // hẳn player (hoặc chọn phim/tập khác) TRONG LÚC đang nạp nguồn →
+        // kết quả nạp bị bỏ qua, player (kể cả native) KHÔNG tự bật lại.
+        movieEpisodeSwitchSerial += 1;
+        var switchSerial = movieEpisodeSwitchSerial;
         stopMoviePlayback(true);
         updateMoviePlayerStatus("Đang chuyển sang " + (episode.title || "tập đã chọn") + "…");
-        loadMovieStreams(movieEpisodeType || "series", episode.id, (movieEpisodeTitle || "Phim") + " · " + (episode.title || "Tập phim"), subtitleContext);
+        loadMovieStreams(movieEpisodeType || "series", episode.id, (movieEpisodeTitle || "Phim") + " · " + (episode.title || "Tập phim"), subtitleContext,
+            function () { return switchSerial === movieEpisodeSwitchSerial && moviePlayerOpen; });
     }
+
+    // =================================================================
+    // [BinTV iOS build 233] LUỒNG KẾT THÚC PHÁT — phim BỘ / phim LẺ
+    //  • Phim BỘ: phát hết tập → TỰ CHUYỂN sang tập tiếp theo; người dùng
+    //    đóng trình phát (hoặc đã phát tập cuối) → quay về CHỌN TẬP.
+    //  • Phim LẺ: phát hết hoặc đóng trình phát → quay về giao diện PHIM.
+    // =================================================================
+
+    // Phim bộ hiện tại còn TẬP TIẾP THEO hợp lệ không?
+    function canPlayNextMovieEpisode() {
+        if (!movieEpisodes || movieEpisodes.length === 0) return false;
+        if (movieEpisodeType !== "series") return false;
+        if (movieCurrentEpisodeIndex < 0) return false;
+        var nextIndex = movieCurrentEpisodeIndex + 1;
+        if (nextIndex >= movieEpisodes.length) return false;
+        var next = movieEpisodes[nextIndex];
+        return !!(next && next.id);
+    }
+
+    // Tự động chuyển sang TẬP TIẾP THEO (giữ nguyên trình phát — đi qua
+    // đúng đường selectMoviePlayerEpisode: khoá serial chống race, giữ cờ
+    // ưu tiên native để native tiếp tục phát nếu nó đang hiển thị).
+    // Trả về true khi lần chuyển tập đã được bắt đầu.
+    function playNextMovieEpisode(origin) {
+        if (!canPlayNextMovieEpisode() || moviePlayerEpisodeSwitchInProgress) return false;
+        var nextIndex = movieCurrentEpisodeIndex + 1;
+        var next = movieEpisodes[nextIndex];
+        try {
+            window.__phimDebug && window.__phimDebug.log("[PLAYER] tự chuyển sang tập tiếp theo (" + (origin || "auto") + "): "
+                + (next.title || ("Tập " + (next.episode || nextIndex + 1))));
+        } catch (e) {}
+        moviePlayerEpisodeIndex = nextIndex;
+        movieEpisodeIndex = nextIndex;      // đồng bộ focus của overlay chọn tập
+        selectMoviePlayerEpisode();
+        return true;
+    }
+
+    // Mở lại overlay "Chọn tập" của PHIM BỘ sau khi trình phát đóng —
+    // yêu cầu: đóng trình phát phim bộ → về giao diện CHỌN TẬP (không phải
+    // lưới phim). Focus đặt ở tập vừa xem để chọn tiếp cho nhanh.
+    function reopenMovieEpisodePicker() {
+        if (!movieBrowserOpen || moviePlayerOpen) return;
+        if (movieEpisodeOpen) return;
+        if (!movieEpisodes || movieEpisodes.length === 0 || movieEpisodeType !== "series") return;
+        var focusIndex = movieCurrentEpisodeIndex >= 0 ? movieCurrentEpisodeIndex : 0;
+        showMovieEpisodes(movieEpisodes, movieEpisodeType, movieEpisodeTitle, movieEpisodeMeta);
+        if (focusIndex >= 0 && focusIndex < movieEpisodes.length) {
+            movieEpisodeIndex = focusIndex;
+            updateMovieEpisodeFocus();
+        }
+    }
+
+    // Video phát HẾT (đường <video> HTML5 — iOS WKWebView / Electron).
+    // JVHD (live) giữ nguyên luồng riêng; TV-fallback giữ nguyên luồng cũ.
+    function handleMoviePlaybackCompleted(origin) {
+        if (jvhdPlayerSession) { handleJvhdPlaybackCompleted(); return; }
+        if (movieTvPlaybackFallback) { handleMoviePlaybackError(); return; }
+        try { window.__phimDebug && window.__phimDebug.log("[PLAYER] phát hết (" + (origin || "ended") + ")"); } catch (e) {}
+        if (movieEpisodes && movieEpisodes.length > 0 && movieEpisodeType === "series") {
+            // Phim BỘ: còn tập → tự chuyển; tập cuối → đóng + về CHỌN TẬP.
+            if (playNextMovieEpisode(origin || "ended")) return;
+            stopMoviePlayback();
+            reopenMovieEpisodePicker();
+            return;
+        }
+        // Phim LẺ: đóng trình phát → về giao diện PHIM (lưới phim).
+        stopMoviePlayback();
+    }
+
+    // Hook cho test jsdom (tests/ios-native-handoff) kiểm tra luồng kết thúc
+    // phát mà không cần iPhone/Xcode — cùng tinh thần __bintvPushNativeSubtitles.
+    window.__bintvMoviePlaybackHooks = {
+        setEpisodes: function (videos, type, title, currentIndex, meta) {
+            movieEpisodes = Array.isArray(videos) ? videos : [];
+            movieEpisodeType = type || "series";
+            movieEpisodeTitle = title || "Phim";
+            movieEpisodeMeta = meta || null;
+            movieCurrentEpisodeIndex = (typeof currentIndex === "number") ? currentIndex : -1;
+        },
+        getState: function () {
+            return {
+                episodes: movieEpisodes.length,
+                type: movieEpisodeType,
+                current: movieCurrentEpisodeIndex,
+                switchInProgress: moviePlayerEpisodeSwitchInProgress,
+                preferNative: moviePreferNativePlayer,
+                handoffActive: movieNativeHandoffActive,
+                pickerOpen: movieEpisodeOpen,
+                playerOpen: moviePlayerOpen,
+                browserOpen: movieBrowserOpen
+            };
+        },
+        setBrowserOpen: function (open) { movieBrowserOpen = !!open; },
+        setPlayerOpen: function (open) { moviePlayerOpen = !!open; },
+        setPreferNative: function (on) { moviePreferNativePlayer = !!on; },
+        setHandoffActive: function (on) { movieNativeHandoffActive = !!on; },
+        canNext: canPlayNextMovieEpisode,
+        playNext: playNextMovieEpisode,
+        reopenPicker: reopenMovieEpisodePicker,
+        completed: handleMoviePlaybackCompleted
+    };
 
     function updateMoviePlayerStatus(message) {
         var msg = String(message || "");
@@ -6146,11 +6325,19 @@
         //  Trên Android/Tizen/Windows cả 2 hàm đều trả false → không đổi gì.
         // =================================================================
         rememberMovieStreamSource(url, title, subtitleContext && subtitleContext.stream);
-        if (iosNeedsNativePlayerFor(url, subtitleContext && subtitleContext.stream)) {
+        // [build 233] Native (AVPlayerViewController) ĐANG là player hiển thị
+        // → mọi lần phát kế tiếp của phiên này (tự chuyển tập / đổi tập trong
+        // menu / nguồn dự phòng) TIẾP TỤC đi qua native, kể cả nguồn HLS vốn
+        // phát được bằng <video>: thẻ <video> nằm SAU lớp native nên nếu nó
+        // nhận phát thì người dùng chỉ nghe tiếng, không thấy hình.
+        var needNativeNow = iosNeedsNativePlayerFor(url, subtitleContext && subtitleContext.stream);
+        if (moviePreferNativePlayer || needNativeNow) {
+            var handoffReason = moviePreferNativePlayer && !needNativeNow
+                ? "continue-native-session" : "unsupported-source";
             try {
-                window.__phimDebug && window.__phimDebug.log("[NATIVE] pre-flight handoff (container/codec WebKit không hỗ trợ):", String(url).substring(0, 140));
+                window.__phimDebug && window.__phimDebug.log("[NATIVE] pre-flight handoff (" + handoffReason + "):", String(url).substring(0, 140));
             } catch (e) {}
-            if (requestNativeMoviePlayback("unsupported-source", url)) return;
+            if (requestNativeMoviePlayback(handoffReason, url)) return;
         }
 
         // [BinTV iOS build 231] VÔ HIỆU HOÁ nhánh TV/EXTERNAL PLAYER (Tizen
@@ -6285,7 +6472,13 @@
                         if (jvhdPlayerSession) handleJvhdPlaybackProgress(htmlTime * 1000);
                     }
                 };
-                htmlVideo.onended = function () { if (jvhdPlayerSession) handleJvhdPlaybackCompleted(); };
+                htmlVideo.onended = function () {
+                    if (jvhdPlayerSession) { handleJvhdPlaybackCompleted(); return; }
+                    // [build 233] Phim BỘ: hết tập → tự phát tập tiếp theo
+                    // (hết tập thì về giao diện chọn tập); phim LẺ → về giao
+                    // diện PHIM. Trước đây video hết là player đứng im.
+                    handleMoviePlaybackCompleted("html5-ended");
+                };
                 htmlVideo.onerror = function (err) {
                     var errInfo = { src: htmlVideo.src, networkState: htmlVideo.networkState, readyState: htmlVideo.readyState, error: htmlVideo.error && { code: htmlVideo.error.code, message: htmlVideo.error.message } };
                     if (window.__phimDebug) window.__phimDebug.error("htmlVideo.onerror", errInfo);
@@ -6325,6 +6518,15 @@
             try {
                 if (typeof window.__bintvStopVideoNative === "function") window.__bintvStopVideoNative();
             } catch (e) {}
+        }
+        // [build 233] ĐÓNG HẲN player (không phải dừng-tạm để đổi tập/nguồn):
+        //  (1) hạ cờ ưu tiên native — lần phát sau bắt đầu như phiên mới;
+        //  (2) VÔ HIỆU mọi lần chuyển tập còn đang nạp nguồn → startMoviePlayback
+        //      của lần nạp đó bị chặn, player (kể cả native) không tự bật lại
+        //      sau khi người dùng đã đóng.
+        if (!keepPlayerVisible) {
+            moviePreferNativePlayer = false;
+            movieEpisodeSwitchSerial += 1;
         }
         if (!preserveTvFallback) clearMovieTvPlaybackFallback();
         movieSubtitleRequestToken++;
@@ -6516,7 +6718,9 @@
         if (movieSearchOpen) { movieSearchToken++; closeMovieSearch(); return true; }
         if (movieSubtitleMenuOpen) { closeMovieSubtitleMenu(); return true; }
         if (moviePlayerEpisodeMenuOpen) { closeMoviePlayerEpisodeMenu(); return true; }
-        if (moviePlayerOpen) { stopMoviePlayback(); return true; }
+        // [build 233] Phim BỘ: đóng trình phát → quay về giao diện CHỌN TẬP
+        // (reopenMovieEpisodePicker tự no-op với phim lẻ → hành vi cũ: lưới).
+        if (moviePlayerOpen) { stopMoviePlayback(); reopenMovieEpisodePicker(); return true; }
         if (movieEpisodeOpen) { closeMovieEpisodes(); return true; }
         if (movieSearchResultsActive) { clearMovieSearchResults(); return true; }
         // [Phim LAN14r 2026-09] Khi dang o man hinh Phim (movieBrowserOpen=true),

@@ -48,6 +48,13 @@ import AVFoundation
 //    (đã có từ build 226) là ĐIỀU KIỆN CẦN cho cả hai đường phát: web
 //    (thẻ <video> inline, không bị WebKit bắt cóc sang fullscreen) và
 //    native (không cần gesture khi AVPlayerViewController tự present).
+//
+// [build 233 — 2026-09-14] LUỒNG KẾT THÚC PHÁT (phim bộ / phim lẻ):
+//  - Native phát HẾT → callback mới __bintvNativePlaybackEnded → app.js
+//    tự chuyển tập (phim bộ còn tập) hoặc đóng player (hết tập / phim lẻ).
+//  - Action MỚI "prepareNext" (helper __bintvPrepareNextNativeEpisode):
+//    JS báo đang nạp tập kế → Swift giữ player mở (backstop 45s).
+//  - JS im lặng → Swift TỰ ĐÓNG player (chống treo phải tắt app).
 // =====================================================================
 
 final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
@@ -817,6 +824,17 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
             } catch (e) { return false; }
         };
 
+        // [build 233] Báo Swift GIỮ player mở trong lúc app.js nạp stream
+        // của TẬP TIẾP THEO (phim bộ tự chuyển tập sau khi phát hết).
+        window.__bintvPrepareNextNativeEpisode = function () {
+            var bridge = handler();
+            if (!bridge) { return false; }
+            try {
+                bridge.postMessage({ action: "prepareNext" });
+                return true;
+            } catch (e) { return false; }
+        };
+
         // Gửi phụ đề (đã parse SRT/VTT) sang Swift để hiển thị trên trình
         // phát native — payload { action:"subtitles", label, cues:[{s,e,t}],
         // session }. `cues` rỗng = tắt phụ đề trong player native.
@@ -1021,6 +1039,16 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
                 "title": request.title
             ])
         }
+        // [build 233] Native phát HẾT tập/phim → JS quyết định next-tập / đóng.
+        nativePlayer.onEnded = { [weak self] request in
+            PhimDebugLog.step("BRIDGE", "nativeEnded→JS", "ok",
+                              "session=\(request.session) title=\(request.logTitle)")
+            self?.notifyWebApp(function: "__bintvNativePlaybackEnded", payload: [
+                "session": request.session,
+                "title": request.title,
+                "url": request.url
+            ])
+        }
         nativePlayer.onStateReconciled = { [weak self] request, position, paused in
             PhimDebugLog.step("PLAYER", "nativeReconcile→JS", "ok",
                               "session=\(request.session) positionMs=\(Int((position * 1000).rounded())) paused=\(paused)")
@@ -1067,6 +1095,14 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         let action = text("action")
         let url = text("url", "streamUrl", "streamURL", "src")
         let proxyURL = text("proxyUrl", "proxyURL", "proxy")
+        // [build 233] Phim bộ: JS báo "đang nạp tập tiếp theo — GIỮ player
+        // mở" sau khi native phát hết tập (chống backstop tự đóng quá sớm).
+        if action == "prepareNext" {
+            PhimDebugLog.step("BRIDGE", "playVideoNative", "prepareNext",
+                              "JS đang nạp tập tiếp theo của phim bộ")
+            nativePlayer.prepareNextEpisode()
+            return
+        }
         // [build 232] Cập nhật phụ đề cho trình phát native đang chạy —
         // action = "subtitles", không có url (đừng nhầm với lệnh stop).
         if action == "subtitles" {
