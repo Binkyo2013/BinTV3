@@ -67,6 +67,11 @@ struct PhimNativePlaybackRequest {
     /// Id phiên phát của web app — echo NGUYÊN VẸN về JS để JS loại bỏ
     /// callback cũ (chống race khi người dùng đã chuyển phim/tập khác).
     let session: String
+    /// Vị trí đã được state contract của PHIM lưu trước lifecycle recovery.
+    /// Nil/0 nghĩa là bắt đầu như một yêu cầu phát mới.
+    let resumePosition: TimeInterval?
+    /// `true` khi người dùng đã tạm dừng trước lúc WebView bị thay thế.
+    let resumePaused: Bool
 
     /// Tiêu đề rút gọn cho log (không bao giờ log full URL chưa sanitize).
     var logTitle: String { title.isEmpty ? "Phim" : title }
@@ -96,6 +101,9 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
     var onFailure: ((PhimNativePlaybackRequest, String) -> Void)?
     /// Người dùng ĐÓNG player (nút Done / vuốt xuống) — JS dọn UI web.
     var onClosed: ((PhimNativePlaybackRequest) -> Void)?
+    /// WebView vừa được tái tạo nhưng player native vẫn sống. Host dùng callback
+    /// này để đồng bộ lại lớp UI JS, không phát lại/khởi tạo nguồn thứ hai.
+    var onStateReconciled: ((PhimNativePlaybackRequest, TimeInterval, Bool) -> Void)?
 
     /// Một ứng viên URL (direct hoặc proxy).
     private struct Candidate {
@@ -112,6 +120,11 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
     private var statusObservation: NSKeyValueObservation?
     private var stallObserver: NSObjectProtocol?
     private var timeoutWork: DispatchWorkItem?
+    private var pendingInitialSeek: CMTime?
+    private var shouldPlayWhenReady = true
+    private var lifecycleResumePosition: CMTime?
+    private var lifecycleShouldResume = false
+    private var lifecycleResumeWork: DispatchWorkItem?
 
     /// Đã báo "bắt đầu phát" cho JS (chỉ 1 lần / phiên).
     private var startedReported = false
@@ -165,6 +178,15 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
         startedReported = false
         dismissingByFailure = false
         self.request = request
+        let requestedPosition = request.resumePosition ?? 0
+        pendingInitialSeek = requestedPosition > 0
+            ? CMTime(seconds: requestedPosition, preferredTimescale: 600)
+            : nil
+        shouldPlayWhenReady = !request.resumePaused
+        lifecycleResumePosition = nil
+        lifecycleShouldResume = false
+        lifecycleResumeWork?.cancel()
+        lifecycleResumeWork = nil
         candidates = Self.makeCandidates(for: request)
         candidateIndex = 0
 
@@ -194,6 +216,71 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
         dismissPlayerController { [weak self] in
             self?.dismissingByFailure = false
         }
+    }
+
+    // MARK: - Application lifecycle / WebView state reconciliation
+
+    /// Snapshot the native player independently of the WKWebView.  Safari and
+    /// Home can suspend WebKit while AVKit remains presented; holding position
+    /// + user intent here prevents an accidental restart or unwanted autoplay.
+    func applicationWillResignActive() {
+        guard let player = player, player.currentItem != nil else { return }
+        let position = player.currentTime()
+        lifecycleResumePosition = position.isNumeric && position.seconds >= 0 ? position : nil
+        lifecycleShouldResume = player.rate > 0
+            || player.timeControlStatus == .waitingToPlayAtSpecifiedRate
+        if lifecycleShouldResume { player.pause() }
+        PhimDebugLog.step("NATIVE", "willResignActive", "snapshot",
+                          "session=\(request?.session ?? "-") positionMs=\(Int((lifecycleResumePosition?.seconds ?? 0) * 1000)) resume=\(lifecycleShouldResume)")
+    }
+
+    func applicationDidEnterBackground() {
+        guard player?.currentItem != nil else { return }
+        PhimDebugLog.step("NATIVE", "didEnterBackground", "held",
+                          "session=\(request?.session ?? "-")")
+    }
+
+    /// Resume only a player that was genuinely playing before suspension. A
+    /// manually paused native player remains paused after Home/Safari return.
+    func applicationDidBecomeActive() {
+        guard lifecycleShouldResume,
+              let activePlayer = player,
+              activePlayer.currentItem != nil,
+              let session = request?.session else { return }
+        lifecycleResumeWork?.cancel()
+        let position = lifecycleResumePosition
+        lifecycleShouldResume = false
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self,
+                  self.player === activePlayer,
+                  self.request?.session == session,
+                  activePlayer.currentItem != nil else { return }
+            let resume: () -> Void = {
+                guard self.request?.session == session else { return }
+                activePlayer.play()
+                PhimDebugLog.step("NATIVE", "didBecomeActive", "resumed",
+                                  "session=\(session) positionMs=\(Int((position?.seconds ?? 0) * 1000))")
+            }
+            if let position = position, position.isNumeric, position.seconds > 0 {
+                activePlayer.seek(to: position, toleranceBefore: .zero, toleranceAfter: .zero) { _ in resume() }
+            } else {
+                resume()
+            }
+        }
+        lifecycleResumeWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+    }
+
+    /// A recreated WKWebView has no memory of the AVPlayer overlay. Re-emit a
+    /// state-only callback rather than calling `play` again, so there is one
+    /// source, one AVPlayer, and one presentation controller.
+    func reconcileWebAppState() {
+        guard let current = request, isPresented, let player = player else { return }
+        let seconds = player.currentTime().isNumeric ? max(0, player.currentTime().seconds) : 0
+        let paused = player.rate <= 0 && player.timeControlStatus == .paused
+        PhimDebugLog.step("NATIVE", "reconcileWebState", "ok",
+                          "session=\(current.session) positionMs=\(Int(seconds * 1000)) paused=\(paused)")
+        onStateReconciled?(current, seconds, paused)
     }
 
     /// Cập nhật phụ đề cho phiên phát ĐANG CHẠY (app.js gửi khi bật/tắt
@@ -316,7 +403,8 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
 
         activePlayer.replaceCurrentItem(with: item)
         // play() trước khi ready là HỢP LỆ: AVPlayer tự phát khi item sẵn sàng.
-        activePlayer.play()
+        // A restored user-paused player deliberately remains paused.
+        if shouldPlayWhenReady { activePlayer.play() } else { activePlayer.pause() }
         armCandidateTimeout(candidate)
     }
 
@@ -327,17 +415,30 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
     private func handleReadyToPlay(candidate: Candidate) {
         timeoutWork?.cancel()
         timeoutWork = nil
-        player?.play()
-        PhimDebugLog.step("NATIVE", "playing-\(candidate.label)", "ok",
-                          "title=\(request?.logTitle ?? "-") session=\(request?.session ?? "-")")
-        playerController?.player = player
-        // [build 232] Phụ đề có thể đã được đẩy tới TRƯỚC khi player
-        // present/ready xong — lúc này mới chắc chắn có contentOverlayView
-        // để treo UILabel phụ đề lên.
-        refreshSubtitleOverlay()
-        if !startedReported {
-            startedReported = true
-            if let current = request { onStarted?(current) }
+        guard let item = player?.currentItem else { return }
+        let seek = pendingInitialSeek
+        pendingInitialSeek = nil
+        let finish: () -> Void = { [weak self] in
+            guard let self = self,
+                  self.player?.currentItem === item else { return }
+            if self.shouldPlayWhenReady { self.player?.play() } else { self.player?.pause() }
+            PhimDebugLog.step("NATIVE", "playing-\(candidate.label)", "ok",
+                              "title=\(self.request?.logTitle ?? "-") session=\(self.request?.session ?? "-") "
+                              + "resume=\(seek == nil ? "new" : "saved") paused=\(!self.shouldPlayWhenReady)")
+            self.playerController?.player = self.player
+            // [build 232] Phụ đề có thể đã được đẩy tới TRƯỚC khi player
+            // present/ready xong — lúc này mới chắc chắn có contentOverlayView
+            // để treo UILabel phụ đề lên.
+            self.refreshSubtitleOverlay()
+            if !self.startedReported {
+                self.startedReported = true
+                if let current = self.request { self.onStarted?(current) }
+            }
+        }
+        if let seek = seek, seek.isNumeric, seek.seconds > 0 {
+            player?.seek(to: seek, toleranceBefore: .zero, toleranceAfter: .zero) { _ in finish() }
+        } else {
+            finish()
         }
     }
 
@@ -357,7 +458,8 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
             guard let self = self else { return }
             guard let item = self.player?.currentItem else { return }
             // Đã phát được rồi → không phải timeout.
-            if item.status == .readyToPlay && (self.player?.rate ?? 0) > 0 { return }
+            if item.status == .readyToPlay
+                && ((self.player?.rate ?? 0) > 0 || !self.shouldPlayWhenReady) { return }
             PhimDebugLog.step("NATIVE", "timeout-\(candidate.label)", "FAIL",
                               "\(Int(Self.candidateTimeout))s không readyToPlay")
             self.advanceToNextCandidate()
@@ -504,6 +606,11 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
     private func teardownCurrentItem() {
         timeoutWork?.cancel()
         timeoutWork = nil
+        lifecycleResumeWork?.cancel()
+        lifecycleResumeWork = nil
+        lifecycleResumePosition = nil
+        lifecycleShouldResume = false
+        pendingInitialSeek = nil
         statusObservation = nil
         removeStallObserver()
         removeSubtitleOverlay()     // [build 232] dọn phụ đề khi đổi/đóng nguồn

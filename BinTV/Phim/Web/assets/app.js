@@ -4882,7 +4882,9 @@
             proxyUrl: proxyUrl,             // đường /proxy (Referer/UA/DoH/ATS)
             referer: referer,
             reason: String(reason || ""),
-            session: session
+            session: session,
+            resumePositionMs: 0,
+            resumePaused: false
         };
 
         var sent = false;
@@ -4973,6 +4975,13 @@
     window.__bintvNativePlaybackStarted = function (info) {
         if (isStaleNativeCallback(info)) return;
         movieNativeHandoffActive = true;
+        // A state-only callback after WKWebView recreation carries native
+        // position/paused intent. Do not start a second stream in JavaScript.
+        if (info && info.reconciled) {
+            var restoredMs = Number(info.positionMs);
+            if (isFinite(restoredMs) && restoredMs >= 0) syncMoviePlaybackClock(restoredMs, !info.paused);
+            if (typeof info.paused === "boolean") moviePlayerPaused = info.paused;
+        }
         // [build 232] Đang bật Vietsub từ trước → đẩy cue sang player native.
         if (movieSubtitleActiveIndex >= 0 && movieSubtitleCues.length > 0) {
             var opt = movieSubtitleOptions[movieSubtitleActiveIndex];
@@ -9847,8 +9856,289 @@
         if (keyName === "back" || keyName === "exit") handleRemoteBackOrExit(e);
     }, true);
 
-    document.addEventListener("visibilitychange", function () { if (document.hidden) clearSessionReferences(); else resumeSessionResources(); }, false);
-    window.addEventListener("pagehide", function () { if (wallpaperTimer) { clearInterval(wallpaperTimer); wallpaperTimer = null; } if (movieBrowserOpen || moviePlayerOpen) closeMovieBrowser(); cancelLongPressTimer(); closeActionMenu(); closeJvhdScreen(); }, false);
+
+    // =================================================================
+    // [BinTV iOS lifecycle] STATE CONTRACT FOR WKWEBVIEW RECOVERY
+    //
+    // This app is also shipped to Android/Tizen/Windows, where pagehide is a
+    // real standalone-app teardown.  The contract below is inert until the
+    // iOS host injects __bintvPhimHostLifecycle.  It captures only app-owned
+    // PHIM state, lets Swift retain it across a WebContent replacement, and
+    // restores the current browser/player rather than merely reloading a
+    // blank page.
+    // =================================================================
+    var movieLifecycleRestoreToken = 0;
+
+    function movieLifecycleCopy(value, fallback) {
+        try { return JSON.parse(JSON.stringify(value)); } catch (e) { return fallback; }
+    }
+
+    function movieLifecycleNumber(value, fallback) {
+        var number = Number(value);
+        return isFinite(number) && number >= 0 ? number : fallback;
+    }
+
+    function movieLifecycleCurrentItem() {
+        var item = null;
+        try { item = movieCurrentSubtitleContext || null; } catch (e) {}
+        if (!item || !item.id) {
+            try { item = movieItems && movieItems[movieItemIndex] ? movieItems[movieItemIndex] : null; } catch (e2) {}
+        }
+        if (!item || !item.id) {
+            try { item = movieAllItems && movieAllItems[movieItemIndex] ? movieAllItems[movieItemIndex] : null; } catch (e3) {}
+        }
+        if (!item) return {};
+        return {
+            id: String(item.id || ""),
+            type: String(item.type || movieEpisodeType || "movie"),
+            name: String(item.name || item.title || movieCurrentStreamTitle || movieEpisodeTitle || "Phim"),
+            item: movieLifecycleCopy(item, null)
+        };
+    }
+
+    function movieLifecyclePlaybackPosition() {
+        var position = movieLifecycleNumber(movieLastKnownPlaybackMilliseconds, 0);
+        try {
+            var video = document.getElementById("bintv-movie-html5-player");
+            var seconds = Number(video && video.currentTime);
+            if (isFinite(seconds) && seconds >= 0) position = Math.max(position, Math.round(seconds * 1000));
+        } catch (e) {}
+        return position;
+    }
+
+    function captureMovieLifecycleState() {
+        var selected = movieLifecycleCurrentItem();
+        var htmlPaused = false;
+        try {
+            var video = document.getElementById("bintv-movie-html5-player");
+            htmlPaused = !!(video && video.paused);
+        } catch (e) {}
+        return {
+            version: 2,
+            capturedAt: Date.now(),
+            browserOpen: !!movieBrowserOpen,
+            screen: moviePlayerOpen ? "player" : (movieEpisodeOpen ? "episodes" : (movieSearchOpen ? "search" : "browser")),
+            catalog: {
+                index: movieCatalogIndex,
+                identity: String(movieActiveCatalogIdentity || ""),
+                filterMode: String(movieFilterMode || "all"),
+                filterIndex: movieFilterIndex,
+                focusArea: String(movieBrowserFocusArea || "catalogs"),
+                itemIndex: movieItemIndex,
+                searchOpen: !!movieSearchOpen,
+                searchQuery: String(movieSearchQuery || "")
+            },
+            selectedMovie: selected,
+            episode: {
+                open: !!movieEpisodeOpen,
+                index: movieEpisodeIndex,
+                currentIndex: movieCurrentEpisodeIndex,
+                type: String(movieEpisodeType || "series"),
+                title: String(movieEpisodeTitle || ""),
+                meta: movieLifecycleCopy(movieEpisodeMeta, null),
+                videos: movieLifecycleCopy(movieEpisodes, [])
+            },
+            player: {
+                open: !!moviePlayerOpen,
+                paused: !!(moviePlayerPaused || (!movieNativeHandoffActive && htmlPaused)),
+                positionMs: movieLifecyclePlaybackPosition(),
+                native: !!movieNativeHandoffActive
+            },
+            source: {
+                url: String(movieCurrentStreamUrl || ""),
+                proxyUrl: String(movieCurrentStreamProxyUrl || ""),
+                referer: String(movieCurrentStreamReferer || ""),
+                title: String(movieCurrentStreamTitle || ""),
+                streamInfo: movieLifecycleCopy(movieCurrentStreamInfo, null),
+                subtitleContext: movieLifecycleCopy(movieCurrentSubtitleContext, null),
+                nativeSession: String(movieNativePlaybackSession || "")
+            }
+        };
+    }
+
+    function movieLifecycleRestoreCatalog(state, token, attempt) {
+        if (token !== movieLifecycleRestoreToken || !state || !state.browserOpen) return;
+        var catalog = state.catalog || {};
+        if (!movieBrowserOpen) {
+            if (attempt < 20) setTimeout(function () { movieLifecycleRestoreCatalog(state, token, attempt + 1); }, 180);
+            return;
+        }
+        movieFilterMode = String(catalog.filterMode || "all");
+        movieFilterIndex = movieLifecycleNumber(catalog.filterIndex, 0);
+        movieBrowserFocusArea = String(catalog.focusArea || "catalogs");
+        var desiredIdentity = String(catalog.identity || "");
+        var desiredIndex = movieLifecycleNumber(catalog.index, 0);
+        var found = -1;
+        for (var i = 0; i < movieCatalogs.length; i++) {
+            if (desiredIdentity && getMovieCatalogIdentity(movieCatalogs[i], movieBaseUrl) === desiredIdentity) { found = i; break; }
+        }
+        if (found >= 0) desiredIndex = found;
+        if (movieCatalogs.length) {
+            desiredIndex = Math.max(0, Math.min(movieCatalogs.length - 1, desiredIndex));
+            movieCatalogIndex = desiredIndex;
+            movieActiveCatalogIdentity = desiredIdentity || getMovieCatalogIdentity(movieCatalogs[desiredIndex], movieBaseUrl);
+            renderMovieCatalogs();
+            // Load once; later passes only recover focus after catalog data
+            // reaches the DOM, avoiding duplicate network/catalog work.
+            if (attempt === 0) loadMovieCatalog(desiredIndex, 0);
+        } else if (attempt < 20) {
+            setTimeout(function () { movieLifecycleRestoreCatalog(state, token, attempt + 1); }, 180);
+            return;
+        }
+        var selectedId = String(state.selectedMovie && state.selectedMovie.id || "");
+        var targetIndex = movieLifecycleNumber(catalog.itemIndex, 0);
+        for (var j = 0; j < movieItems.length; j++) {
+            if (selectedId && movieItems[j] && String(movieItems[j].id || "") === selectedId) { targetIndex = j; break; }
+        }
+        if (movieItems.length) movieItemIndex = Math.max(0, Math.min(movieItems.length - 1, targetIndex));
+        try { updateMovieBrowserFocus(); } catch (focusError) {}
+        // Catalog caches can populate asynchronously after the page rebuild.
+        // Retry focus only (not the load) for a bounded period.
+        if (attempt < 6) setTimeout(function () { movieLifecycleRestoreCatalog(state, token, attempt + 1); }, 250);
+    }
+
+    function movieLifecycleOpenBrowser(state, token) {
+        if (!state || !state.browserOpen) return;
+        if (movieBrowserOpen) {
+            movieLifecycleRestoreCatalog(state, token, 0);
+            return;
+        }
+        var cache = null;
+        try { cache = getMovieBootstrapCache(); } catch (e) {}
+        if (cache && cache.manifestUrl && cache.manifest) {
+            openMovieBrowser(cache.manifestUrl, cache.manifest);
+        } else {
+            // Bootstrap remains the authoritative configuration path; this
+            // does not alter a movie JSON source or invent a direct URL.
+            launchBuiltinMovie();
+        }
+        movieLifecycleRestoreCatalog(state, token, 0);
+    }
+
+    function movieLifecycleShowNativePlayerShell(state) {
+        var source = state.source || {};
+        var playerState = state.player || {};
+        ensureMovieExperienceUI();
+        try { if (document.body) document.body.classList.add("bintv-movie-mode"); } catch (e) {}
+        movieBrowserOpen = true;
+        moviePlayerOpen = true;
+        moviePlayerPaused = !!playerState.paused;
+        movieNativeHandoffActive = true;
+        movieCurrentStreamUrl = String(source.url || "");
+        movieCurrentStreamProxyUrl = String(source.proxyUrl || "");
+        movieCurrentStreamReferer = String(source.referer || "");
+        movieCurrentStreamTitle = String(source.title || (state.selectedMovie && state.selectedMovie.name) || "Phim");
+        movieCurrentStreamInfo = source.streamInfo || null;
+        movieCurrentSubtitleContext = source.subtitleContext || (state.selectedMovie && state.selectedMovie.item) || null;
+        var sessionNumber = Number(source.nativeSession);
+        if (isFinite(sessionNumber) && sessionNumber >= 0) movieNativePlaybackSession = sessionNumber;
+        var browser = document.getElementById("bintv-movie-browser");
+        var player = document.getElementById("bintv-movie-player");
+        var title = document.getElementById("bintv-movie-player-title");
+        if (browser) browser.classList.add("show", "player-active");
+        if (player) player.classList.add("show");
+        if (title) title.textContent = movieCurrentStreamTitle;
+        updateMoviePlayerStatus(moviePlayerPaused ? "Tạm dừng (trình phát gốc iOS)" : "Đang phát (trình phát gốc iOS)");
+    }
+
+    function movieLifecycleResumeWebPlayer(state) {
+        var source = state.source || {};
+        var playerState = state.player || {};
+        var sourceUrl = String(source.url || "");
+        if (!sourceUrl) return;
+        // Go back through the normal player path so proxy/header/fallback
+        // behavior stays identical to a user-selected movie.
+        startMoviePlayback(sourceUrl,
+            String(source.title || (state.selectedMovie && state.selectedMovie.name) || "Phim"),
+            source.subtitleContext || (state.selectedMovie && state.selectedMovie.item) || null);
+        var desiredMs = movieLifecycleNumber(playerState.positionMs, 0);
+        var shouldPause = !!playerState.paused;
+        var tries = 0;
+        function seekWhenReady() {
+            var video = document.getElementById("bintv-movie-html5-player");
+            if (!video) return;
+            if (video.readyState < 1 && tries++ < 24) { setTimeout(seekWhenReady, 200); return; }
+            if (desiredMs > 0) {
+                try { video.currentTime = desiredMs / 1000; } catch (e) {}
+                syncMoviePlaybackClock(desiredMs, !shouldPause);
+            }
+            moviePlayerPaused = shouldPause;
+            if (shouldPause) {
+                try { video.pause(); } catch (pauseError) {}
+                updateMoviePlayerStatus("Tạm dừng");
+            }
+        }
+        setTimeout(seekWhenReady, 0);
+    }
+
+    function restoreMovieLifecycleState(state, options) {
+        var snapshot = state && typeof state === "object" ? state : null;
+        if (!snapshot || Number(snapshot.version || 0) < 1) return "no-state";
+        var token = ++movieLifecycleRestoreToken;
+        movieLifecycleOpenBrowser(snapshot, token);
+        if (snapshot.screen === "episodes" && snapshot.episode && Array.isArray(snapshot.episode.videos)) {
+            setTimeout(function () {
+                if (token !== movieLifecycleRestoreToken) return;
+                showMovieEpisodes(snapshot.episode.videos,
+                    snapshot.episode.type || "series",
+                    snapshot.episode.title || "Phim",
+                    snapshot.episode.meta || null);
+                movieEpisodeIndex = movieLifecycleNumber(snapshot.episode.index, 0);
+                movieCurrentEpisodeIndex = movieLifecycleNumber(snapshot.episode.currentIndex, -1);
+                updateMovieEpisodeFocus();
+            }, 0);
+        }
+        if (snapshot.player && snapshot.player.open) {
+            setTimeout(function () {
+                if (token !== movieLifecycleRestoreToken) return;
+                if (snapshot.player.native) movieLifecycleShowNativePlayerShell(snapshot);
+                else movieLifecycleResumeWebPlayer(snapshot);
+            }, 0);
+        }
+        return options && options.rebuilt ? "restored-rebuilt" : "restored-live";
+    }
+
+    window.__bintvPhimLifecycle = {
+        capture: captureMovieLifecycleState,
+        restore: restoreMovieLifecycleState
+    };
+
+    function isBintvIosLifecycleHost() {
+        try {
+            return !!(window.__bintvIosNativeBridge
+                && window.__bintvPhimHostLifecycle
+                && window.webkit && window.webkit.messageHandlers
+                && window.webkit.messageHandlers.phimLifecycle);
+        }
+        catch (e) { return false; }
+    }
+
+    function captureBintvIosLifecycle(reason) {
+        try {
+            if (window.__bintvPhimHostLifecycle && typeof window.__bintvPhimHostLifecycle.capture === "function") {
+                window.__bintvPhimHostLifecycle.capture(reason);
+            }
+        } catch (e) {}
+    }
+
+    document.addEventListener("visibilitychange", function () {
+        if (isBintvIosLifecycleHost()) {
+            if (document.hidden) captureBintvIosLifecycle("app-js-visibilitychange");
+            return;
+        }
+        if (document.hidden) clearSessionReferences(); else resumeSessionResources();
+    }, false);
+    window.addEventListener("pagehide", function () {
+        if (isBintvIosLifecycleHost()) {
+            captureBintvIosLifecycle("app-js-pagehide");
+            return;
+        }
+        if (wallpaperTimer) { clearInterval(wallpaperTimer); wallpaperTimer = null; }
+        if (movieBrowserOpen || moviePlayerOpen) closeMovieBrowser();
+        cancelLongPressTimer();
+        closeActionMenu();
+        closeJvhdScreen();
+    }, false);
 
     function updateDateTime() {
         var now = new Date();

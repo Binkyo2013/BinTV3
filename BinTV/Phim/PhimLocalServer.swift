@@ -16,7 +16,10 @@ enum PhimDebugLog {
     }()
     private static let lock = NSLock()
 
-    static func log(_ message: String) {
+    /// Write a line without changing its diagnostic category.  `log(_:)` below
+    /// is intentionally the only public entry point for unstructured messages,
+    /// so every PHIM diagnostic has one of the requested BinTV prefixes.
+    private static func write(_ message: String) {
         let line = "[\(Date())] \(message)\n"
         guard let data = line.data(using: .utf8) else { return }
         lock.lock()
@@ -30,17 +33,34 @@ enum PhimDebugLog {
         }
     }
 
+    /// Unstructured messages (including JavaScript console forwarding) belong
+    /// to the PHIM category.  Do not log raw signed stream URLs here.
+    static func log(_ message: String) {
+        let prefix = message.hasPrefix("[BINTV-") ? "" : "[BINTV-PHIM] "
+        write(prefix + message)
+    }
+
     // =================================================================
-    // [PHIM_DEBUG 2026-09-12] Log CÓ CẤU TRÚC theo format bắt buộc:
-    //   [PHIM_DEBUG] Step -> Action -> Status -> Payload/URL
-    // Dùng cho toàn bộ luồng: SERVER (bind/accept) → STATIC → PROXY
-    // (request/response/redirect/m3u8-rewrite/DoH/RawHttp) → WEBVIEW →
-    // PLAYER (JS observer) → BRIDGE → ORIENTATION.
-    // `payload` đi qua sanitizeURL khi là URL — token nhạy cảm bị che.
+    // [PHIM_DEBUG] Structured diagnostics.  The short category makes it easy
+    // to filter device logs while retaining the legacy PHIM_DEBUG payload for
+    // existing support tooling.
     // =================================================================
+    private static func bintvPrefix(for step: String) -> String {
+        switch step.uppercased() {
+        case "LIFECYCLE", "SCENE":
+            return "[BINTV-LIFECYCLE]"
+        case "WEBVIEW", "NAVIGATION", "VIEW":
+            return "[BINTV-WEBVIEW]"
+        case "PLAYER", "NATIVE":
+            return "[BINTV-PLAYER]"
+        default:
+            return "[BINTV-PHIM]"
+        }
+    }
+
     static func step(_ step: String, _ action: String, _ status: String, _ payload: String = "") {
         let tail = payload.isEmpty ? "" : " -> \(payload)"
-        log("[PHIM_DEBUG] \(step) -> \(action) -> \(status)\(tail)")
+        write("\(bintvPrefix(for: step)) [PHIM_DEBUG] \(step) -> \(action) -> \(status)\(tail)")
     }
 
     /// Tên query parameter nhạy cảm (khớp không phân biệt hoa thường) —
@@ -596,6 +616,26 @@ final class PhimLocalServer: NSObject, URLSessionTaskDelegate {
             }
             PhimDebugLog.step("SERVER", "relaunchListener", "begin",
                               "listener đã chết — bind lại (port cũ=\(self.port))")
+            self.startListenerBsd()
+        }
+    }
+
+    /// Force a listener-only restart after a failed /health probe.  Unlike
+    /// `stop()`, this intentionally leaves proxySession and in-flight proxy
+    /// connections alone, so PHIM recovery never tears down unrelated media
+    /// work. The old accept loop exits after its listening fd is closed.
+    func restartListener() {
+        serverQueue.async { [weak self] in
+            guard let self = self else { return }
+            let previousPort = self.port
+            self.listenActive = false
+            if self.listenFd >= 0 {
+                close(self.listenFd)
+                self.listenFd = -1
+            }
+            self.port = 0
+            PhimDebugLog.step("SERVER", "restartListener", "begin",
+                              "health probe failed; oldPort=\(previousPort)")
             self.startListenerBsd()
         }
     }

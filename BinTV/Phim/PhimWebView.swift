@@ -50,11 +50,16 @@ import AVFoundation
 //    native (không cần gesture khi AVPlayerViewController tự present).
 // =====================================================================
 
-final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, WKNavigationDelegate {
+final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
 
     @Published var loadFailed = false
     @Published var failMessage = ""
-    let webView: WKWebView
+    /// The controller owns the active WKWebView.  It is deliberately mutable:
+    /// a terminated WebContent process is rebuilt with a new configuration and
+    /// reattached by PhimWebViewContainer instead of leaving a dead black layer
+    /// in the SwiftUI hierarchy.
+    @Published private(set) var webView: WKWebView
+    private var webViewGeneration = 0
     private var server: PhimLocalServer?
     private var started = false
 
@@ -76,121 +81,107 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
 
     override init() {
         PhimDebugLog.step("WEBVIEW", "controllerInit", "begin")
+        let configuration = Self.makeWebViewConfiguration()
+        webView = Self.makeWebView(configuration: configuration)
+        super.init()
+
+        configure(webView, configuration: configuration)
+        configureNativePlayerCallbacks()
+        installLifecycleObservers()
+        registerBackHandler()
+        PhimDebugLog.step("WEBVIEW", "controllerInit", "ok",
+                          "inline=true autoplay=all lifecycle=guarded")
+    }
+
+    /// Every replacement must receive exactly the same supported WebKit
+    /// configuration and user scripts as the first instance.  This is kept in
+    /// one factory so a recovery cannot accidentally lose its bridge/delegates.
+    private static func makeWebViewConfiguration() -> WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
-        // Data store persistent: localStorage của web app (bootstrap/
-        // catalog cache) sống qua các lần mở app — giống DOM storage
-        // Android.
         configuration.websiteDataStore = .default()
-        // Autoplay (web app phát video ngay khi mở phim).
         configuration.mediaTypesRequiringUserActionForPlayback = []
-        // =================================================================
-        // [FIX 2026-09-12 — ROOT CAUSE "Không thể phát nguồn phim này trên TV"]
-        // allowsInlineMediaPlayback: mặc định FALSE trên iPhone (chỉ iPad
-        // mặc định true). Khi false, thuộc tính HTML `playsinline` của thẻ
-        // <video id="bintv-movie-html5-player"> BỊ WEBKIT BỎ QUA:
-        //  - video.play() (app.js gọi SAU chuỗi resolve stream bất đồng bộ —
-        //    không còn user-activation) → play() reject NotAllowedError,
-        //    hoặc WebKit tự "bắt cóc" video sang player FULLSCREEN native;
-        //  - player fullscreen native KHÔNG phát được nội dung MSE của
-        //    hls.js (iOS 17.1+, ManagedMediaSource) → hls.js fatal error;
-        //  - video.onerror / hls ERROR → handleMoviePlaybackError() → hết
-        //    stream fallback → app.js hiện đúng lỗi "Không thể phát nguồn
-        //    phim này trên TV" (app.js:5380);
-        //  - fullscreen takeover cũng là thủ phạm XOAY MÀN HÌNH khỏi
-        //    landscape khi mở player (nhiệm vụ Orientation).
-        // PHẢI set TRƯỚC khi khởi tạo WKWebView (Apple docs: configuration
-        // chỉ áp dụng lúc init). Đây là công tắc CHÍNH THỨC — không hack.
-        // =================================================================
         configuration.allowsInlineMediaPlayback = true
-        // Shim AndroidBridge — chạy TRƯỚC hls.min.js/tizen_shim.js/app.js.
-        // [build 225] ÉP viewport chuẩn thiết bị TRƯỚC mọi script của web app.
-        configuration.userContentController.addUserScript(
-            WKUserScript(source: Self.viewportFixJS, injectionTime: .atDocumentStart, forMainFrameOnly: true)
-        )
-        configuration.userContentController.addUserScript(
-            WKUserScript(source: Self.bridgeShimJS, injectionTime: .atDocumentStart, forMainFrameOnly: true)
-        )
-        // =================================================================
-        // [build 231 — 2026-09-13] CẦU NỐI NATIVE PLAYER (JS → Swift)
-        // Tiêm ở DOCUMENT START để `window.__bintvPlayVideoNative` tồn tại
-        // TRƯỚC khi app.js chạy: app.js gọi hàm này khi nguồn phim là thứ
-        // WebKit không giải mã được (MKV / AC3/EAC3/DTS) hoặc khi <video>
-        // báo lỗi — thay vì rơi vào nhánh fallback TV ("Không thể phát …
-        // trên TV"). Kèm listener CAPTURE trên document bắt sự kiện người
-        // dùng CLICK thẻ phim (ghi "ý định phát": id + tên phim).
-        // =================================================================
-        configuration.userContentController.addUserScript(
-            WKUserScript(source: Self.nativeHandoffJS, injectionTime: .atDocumentStart, forMainFrameOnly: true)
-        )
-        // Hook console.* của web app → phim_debug.log (xem consoleCaptureJS).
-        configuration.userContentController.addUserScript(
-            WKUserScript(source: Self.consoleCaptureJS, injectionTime: .atDocumentStart, forMainFrameOnly: true)
-        )
-        // [PHIM_DEBUG] Observer THỤ ĐỘNG (không đụng logic app.js): log môi
-        // trường phát (MSE/ManagedMediaSource/hls.js/native HLS/inline) +
-        // mọi sự kiện media của thẻ <video> theo format chuẩn
-        // `[PHIM_DEBUG] Step -> Action -> Status -> Payload/URL` (token đã
-        // che). Chạy SAU DOMContentLoaded nên app.js/hls.js không bị ảnh
-        // hưởng; mọi listener đặt ở capture phase và không preventDefault.
-        configuration.userContentController.addUserScript(
-            WKUserScript(source: Self.playerObserverJS, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
-        )
-        // [build 224] Player CHUẨN iOS (thay phim_player_ui.js đã xoá).
-        configuration.userContentController.addUserScript(
-            WKUserScript(source: Self.nativePlayerJS, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
-        )
-        // [build 228] CSS bố cục PHIM — TIÊM TỪ SWIFT (không phụ thuộc file).
-        configuration.userContentController.addUserScript(
-            WKUserScript(source: Self.layoutFixJS, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
-        )
-        webView = WKWebView(frame: .zero, configuration: configuration)
+
+        let content = configuration.userContentController
+        // Order matters: the host lifecycle guard and native bridge must exist
+        // before app.js registers its pagehide/visibility listeners.
+        content.addUserScript(WKUserScript(source: Self.viewportFixJS,
+                                           injectionTime: .atDocumentStart,
+                                           forMainFrameOnly: true))
+        content.addUserScript(WKUserScript(source: Self.bridgeShimJS,
+                                           injectionTime: .atDocumentStart,
+                                           forMainFrameOnly: true))
+        content.addUserScript(WKUserScript(source: Self.nativeHandoffJS,
+                                           injectionTime: .atDocumentStart,
+                                           forMainFrameOnly: true))
+        content.addUserScript(WKUserScript(source: Self.lifecycleBridgeJS,
+                                           injectionTime: .atDocumentStart,
+                                           forMainFrameOnly: true))
+        content.addUserScript(WKUserScript(source: Self.consoleCaptureJS,
+                                           injectionTime: .atDocumentStart,
+                                           forMainFrameOnly: true))
+        content.addUserScript(WKUserScript(source: Self.playerObserverJS,
+                                           injectionTime: .atDocumentEnd,
+                                           forMainFrameOnly: true))
+        content.addUserScript(WKUserScript(source: Self.nativePlayerJS,
+                                           injectionTime: .atDocumentEnd,
+                                           forMainFrameOnly: true))
+        content.addUserScript(WKUserScript(source: Self.layoutFixJS,
+                                           injectionTime: .atDocumentEnd,
+                                           forMainFrameOnly: true))
+        return configuration
+    }
+
+    private static func makeWebView(configuration: WKWebViewConfiguration) -> WKWebView {
+        let view = WKWebView(frame: .zero, configuration: configuration)
+        view.backgroundColor = .black
+        view.scrollView.backgroundColor = .black
+        view.scrollView.contentInsetAdjustmentBehavior = .never
+        view.accessibilityIdentifier = "BinTV.Phim.WebView"
         #if DEBUG
-        // Safari Web Inspector attach được vào webview (dev build).
         if #available(iOS 16.4, *) {
-            webView.isInspectable = true
+            view.isInspectable = true
         }
         #endif
-        webView.backgroundColor = .black
-        super.init()
-        // Đăng ký SAU super.init() (không dùng self trước super.init —
-        // cùng bài học đã áp dụng cho MovieListView). Cùng 1
-        // userContentController mà WKWebView đang dùng.
-        configuration.userContentController.add(self, name: "phimBridge")
-        configuration.userContentController.add(self, name: "phimConsole")
-        // =================================================================
-        // [build 231 — 2026-09-13] Message handler `playVideoNative`:
-        // JS gửi { url: streamUrl, title, proxyUrl, referer, reason, session }
-        // → userContentController(_:didReceive:) bên dưới → mở trình phát
-        // GỐC (AVPlayerViewController) trong BinTV/Player/.
-        // =================================================================
-        configuration.userContentController.add(self, name: "playVideoNative")
-        webView.navigationDelegate = self
-        // Nối callback của native player về web app (evaluateJavaScript):
-        // started / failed / closed — nhờ đó app.js thử nguồn kế tiếp,
-        // hiện thông báo THẬT, hoặc dọn UI khi người dùng đóng player.
-        configureNativePlayerCallbacks()
-        // [build 224] Theo dõi app rời/vào lại foreground — phục hồi tab
-        // PHIM khi WebContent process hoặc socket server bị hệ thống dừng.
-        installLifecycleObservers()
-        // Long-press (≥0.35s) = HIỆN MENU TAB — nhất quán 4 tab.
-        // cancelsTouchesInView = false → tap / swipe / gesture video
-        // HOÀN TOÀN không bị ảnh hưởng (cùng kỹ thuật long-press của TUBE).
+        return view
+    }
+
+    /// Attach delegates, message handlers and recognizers after `super.init()`.
+    /// This method is also used by a recovered web view.
+    private func configure(_ view: WKWebView, configuration: WKWebViewConfiguration) {
+        let content = configuration.userContentController
+        content.add(self, name: "phimBridge")
+        content.add(self, name: "phimConsole")
+        content.add(self, name: "playVideoNative")
+        content.add(self, name: "phimLifecycle")
+        view.navigationDelegate = self
+        view.uiDelegate = self
+
         let menuGesture = UILongPressGestureRecognizer(
             target: self, action: #selector(handleMenuLongPress(_:))
         )
         menuGesture.minimumPressDuration = 0.35
         menuGesture.cancelsTouchesInView = false
-        webView.addGestureRecognizer(menuGesture)
-        // [2026-09-12] Đăng ký vào chuỗi Back toàn app (vuốt cạnh trái):
-        // CHỈ xử lý khi webview thật sự còn lịch sử (canGoBack) — trả false
-        // thì ContentView rơi tiếp xuống mức "root = không làm gì", không
-        // bao giờ Back hụt hay thoát app. Không đụng logic tải/phát phim.
+        menuGesture.delaysTouchesBegan = false
+        view.addGestureRecognizer(menuGesture)
+    }
+
+    private func detach(_ view: WKWebView) {
+        view.stopLoading()
+        view.navigationDelegate = nil
+        view.uiDelegate = nil
+        let content = view.configuration.userContentController
+        ["phimBridge", "phimConsole", "playVideoNative", "phimLifecycle"].forEach {
+            content.removeScriptMessageHandler(forName: $0)
+        }
+    }
+
+    private func registerBackHandler() {
         BinTVBackRegistry.shared.register(tab: BinTVPage.phim.rawValue) { [weak self] in
-            guard let wv = self?.webView, wv.canGoBack else { return false }
-            wv.goBack()
+            guard let self = self, self.webView.canGoBack else { return false }
+            self.webView.goBack()
             return true
         }
-        PhimDebugLog.step("WEBVIEW", "controllerInit", "ok", "inline=true autoplay=all bridge=shimmed")
     }
 
     /// Long-press đủ 0.35s → hiện menu tab (LIVE TV/TUBE/PHIM/SETTINGS).
@@ -270,7 +261,7 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         return URL(string: "http://127.0.0.1:\(server.port)/?android=phone&ios=landscape")
     }
 
-    private func loadPage() {
+    private func loadPage(cachePolicy: URLRequest.CachePolicy = .reloadIgnoringLocalCacheData) {
         guard let url = pageURL() else {
             PhimDebugLog.step("WEBVIEW", "loadPage", "FAIL", "không có port")
             failMessage = "Server Phim chưa có port."
@@ -280,7 +271,7 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         PhimDebugLog.step("WEBVIEW", "loadPage", "begin", PhimDebugLog.sanitizeURL(url.absoluteString))
         loadFailed = false
         failMessage = ""
-        webView.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 20))
+        webView.load(URLRequest(url: url, cachePolicy: cachePolicy, timeoutInterval: 20))
     }
 
     func retryLoad() {
@@ -791,6 +782,10 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
             try { return String(value === null || value === undefined ? "" : value); }
             catch (e) { return ""; }
         }
+        function nonNegativeNumber(value) {
+            var number = Number(value);
+            return isFinite(number) && number >= 0 ? number : 0;
+        }
 
         // Gửi streamUrl sang Swift native (AVPlayerViewController).
         window.__bintvPlayVideoNative = function (payload) {
@@ -804,7 +799,9 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
                     proxyUrl: text(body.proxyUrl),
                     referer: text(body.referer),
                     reason: text(body.reason),
-                    session: text(body.session)
+                    session: text(body.session),
+                    resumePositionMs: nonNegativeNumber(body.resumePositionMs),
+                    resumePaused: body.resumePaused === true
                 });
                 return true;
             } catch (e) { return false; }
@@ -884,6 +881,113 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     """
 
     // =====================================================================
+    // Host lifecycle bridge (document-start)
+    //
+    // The web app was originally written for a standalone TV shell.  Its
+    // legacy visibility/pagehide handlers close the movie browser, which is
+    // destructive when iOS temporarily backgrounds the WKWebView for Home or
+    // Safari.  This bridge is injected only by the iOS host.  It snapshots the
+    // state before suspension and prevents those legacy handlers from tearing
+    // down the active PHIM screen.
+    // =====================================================================
+    private static let lifecycleBridgeJS = """
+    (function () {
+        "use strict";
+        if (window.__bintvPhimHostLifecycle) { return; }
+
+        function messageHandler() {
+            try {
+                return window.webkit && window.webkit.messageHandlers
+                    && window.webkit.messageHandlers.phimLifecycle;
+            } catch (e) { return null; }
+        }
+
+        // No message handler means this script is not running inside the
+        // BinTV iOS host. Leave standalone Android/Windows behavior untouched.
+        if (!messageHandler()) { return; }
+
+        function fallbackState() {
+            try {
+                var browser = document.getElementById("bintv-movie-browser");
+                var player = document.getElementById("bintv-movie-player");
+                var video = document.getElementById("bintv-movie-html5-player");
+                var card = document.querySelector(".movie-card.focus")
+                    || document.querySelector(".movie-card[data-movie-id]");
+                return {
+                    version: 1,
+                    browserOpen: !!(browser && browser.classList.contains("show")),
+                    screen: player && player.classList.contains("show") ? "player" : "browser",
+                    selectedMovie: card ? {
+                        id: String(card.getAttribute("data-movie-id") || ""),
+                        name: String(card.getAttribute("data-movie-name") || ""),
+                        type: String(card.getAttribute("data-movie-type") || "")
+                    } : {},
+                    player: {
+                        open: !!(player && player.classList.contains("show")),
+                        paused: !!(video && video.paused),
+                        positionMs: video && isFinite(video.currentTime) ? Math.round(video.currentTime * 1000) : 0
+                    },
+                    source: { url: video ? String(video.currentSrc || video.src || "") : "" }
+                };
+            } catch (e) { return { version: 1, screen: "unknown" }; }
+        }
+
+        function readState() {
+            try {
+                if (window.__bintvPhimLifecycle
+                    && typeof window.__bintvPhimLifecycle.capture === "function") {
+                    return window.__bintvPhimLifecycle.capture();
+                }
+            } catch (e) {}
+            return fallbackState();
+        }
+
+        function capture(reason, suppliedState) {
+            var state = suppliedState || readState();
+            try { sessionStorage.setItem("__bintvPhimLifecycleState", JSON.stringify(state)); } catch (e) {}
+            try {
+                var bridge = messageHandler();
+                if (bridge) bridge.postMessage({
+                    action: "snapshot",
+                    reason: String(reason || "unknown"),
+                    state: state
+                });
+            } catch (e2) {}
+            return state;
+        }
+
+        window.__bintvPhimHostLifecycle = {
+            capture: capture,
+            readStored: function () {
+                try {
+                    var raw = sessionStorage.getItem("__bintvPhimLifecycleState");
+                    return raw ? JSON.parse(raw) : null;
+                } catch (e) { return null; }
+            }
+        };
+
+        // Capture-phase listeners are installed before app.js.  Stop the old
+        // standalone cleanup listener only for this embedded iOS host; it
+        // would otherwise call closeMovieBrowser() and leave a black surface.
+        document.addEventListener("visibilitychange", function (event) {
+            if (!document.hidden) { return; }
+            capture("visibilitychange");
+            try { event.stopImmediatePropagation(); } catch (e) {}
+        }, true);
+        window.addEventListener("pagehide", function (event) {
+            capture("pagehide");
+            try { event.stopImmediatePropagation(); } catch (e) {}
+        }, true);
+        window.addEventListener("pageshow", function () {
+            try {
+                var bridge = messageHandler();
+                if (bridge) bridge.postMessage({ action: "pageshow" });
+            } catch (e) {}
+        }, true);
+    })();
+    """
+
+    // =====================================================================
     // [build 231] Xử lý message `playVideoNative` → mở trình phát GỐC iOS
     // =====================================================================
 
@@ -915,6 +1019,18 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
             self?.notifyWebApp(function: "__bintvNativePlaybackClosed", payload: [
                 "session": request.session,
                 "title": request.title
+            ])
+        }
+        nativePlayer.onStateReconciled = { [weak self] request, position, paused in
+            PhimDebugLog.step("PLAYER", "nativeReconcile→JS", "ok",
+                              "session=\(request.session) positionMs=\(Int((position * 1000).rounded())) paused=\(paused)")
+            self?.notifyWebApp(function: "__bintvNativePlaybackStarted", payload: [
+                "session": request.session,
+                "title": request.title,
+                "url": request.url,
+                "positionMs": Int((position * 1000).rounded()),
+                "paused": paused,
+                "reconciled": true
             ])
         }
     }
@@ -973,7 +1089,9 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
             title: text("title", "name"),
             referer: text("referer", "referrer", "__ref"),
             reason: text("reason", "source"),
-            session: text("session")
+            session: text("session"),
+            resumePosition: Self.resumePosition(from: dict["resumePositionMs"] ?? dict["positionMs"]),
+            resumePaused: Self.boolValue(dict["resumePaused"]) ?? false
         )
         PhimDebugLog.step("BRIDGE", "playVideoNative", "recv",
                           "title=\(request.logTitle) reason=\(request.reason.isEmpty ? "-" : request.reason) "
@@ -1007,6 +1125,30 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         if Thread.isMainThread { update() } else { DispatchQueue.main.async(execute: update) }
     }
 
+    /// Vị trí resume từ JavaScript theo milliseconds. Values không hợp lệ bị
+    /// bỏ qua để một message lạ không thể làm AVPlayer seek sang NaN/vô cực.
+    private static func resumePosition(from value: Any?) -> TimeInterval? {
+        let milliseconds: Double?
+        if let number = value as? NSNumber { milliseconds = number.doubleValue }
+        else if let string = value as? String { milliseconds = Double(string) }
+        else { milliseconds = nil }
+        guard let milliseconds = milliseconds, milliseconds.isFinite, milliseconds > 0 else { return nil }
+        return milliseconds / 1000
+    }
+
+    private static func boolValue(_ value: Any?) -> Bool? {
+        if let value = value as? Bool { return value }
+        if let number = value as? NSNumber { return number.boolValue }
+        if let text = value as? String {
+            switch text.lowercased() {
+            case "true", "1", "yes": return true
+            case "false", "0", "no": return false
+            default: return nil
+            }
+        }
+        return nil
+    }
+
     /// Đọc số giây từ payload JSON (NSNumber từ JSONSerialization, hoặc chuỗi).
     private static func cueTime(_ value: Any?) -> TimeInterval? {
         if let number = value as? NSNumber { return number.doubleValue }
@@ -1025,6 +1167,10 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         // [build 231] JS yêu cầu phát bằng TRÌNH PHÁT GỐC iOS (AVPlayer).
         if message.name == "playVideoNative" {
             handlePlayVideoNative(message.body)
+            return
+        }
+        if message.name == "phimLifecycle" {
+            handleLifecycleBridge(message.body)
             return
         }
         if message.name == "phimConsole" {
@@ -1112,341 +1258,608 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     }
 
     // =====================================================================
-    // [FIX 2026-09-13 — ROOT CAUSE "từ màn hình chính quay lại: tab PHIM
-    //  ĐEN HOÀN TOÀN"]
+    // PHIM foreground recovery
     //
-    // Ba cơ chế hệ thống xảy ra khi app ở nền, CÙNG cho kết quả "màn đen":
-    //  (1) WebContent process của WKWebView bị kết thúc (jetsam / áp lực bộ
-    //      nhớ). Delegate `webViewWebContentProcessDidTerminate` có reload,
-    //      NHƯNG reload ngay LÚC ĐÓ thường KHÔNG hoàn tất vì app chưa active
-    //      → quay lại chỉ còn layer đen, không tự phục hồi (đúng triệu chứng).
-    //  (2) Socket của server nội bộ (127.0.0.1) bị ĐÓNG khi app ở nền → mọi
-    //      reload/load sau đó thất bại (trang trắng/đen) dù webview còn sống.
-    //  (3) Webview còn sống nhưng KHÔNG được vẽ lại sau khi app trở lại
-    //      (render bị treo) → vẫn đen cho đến khi có một repaint.
+    // There are two separate failure modes that previously both looked like a
+    // black PHIM screen:
+    //   1. app.js treated iOS visibility/pagehide as a standalone-app exit and
+    //      called closeMovieBrowser();
+    //   2. WebKit may terminate its WebContent process while suspended.
     //
-    // Sửa ĐÚNG NGUYÊN NHÂN theo từng cơ chế: hoãn reload tới khi app thật
-    // sự active, đảm bảo server còn sống TRƯỚC khi reload, và ép vẽ lại +
-    // kiểm tra DOM thật sự còn nội dung (không reload bừa nếu cache/trạng
-    // thái vẫn dùng được).
+    // The document-start bridge prevents (1).  For (2), retain a small state
+    // snapshot while the page is alive, wait for *didBecomeActive* (never
+    // reload during willEnterForeground), probe the existing view, and create
+    // a new WKWebView only when there is evidence that the old one is gone.
     // =====================================================================
 
     private var lifecycleObservers: [NSObjectProtocol] = []
-
-    /// Process bị kết thúc TRONG LÚC app ở nền → hoãn phục hồi tới foreground.
-    private var pendingRestoreAfterBackground = false
-
-    /// Watchdog: sau khi nạp lại, kiểm tra webview có THẬT SỰ vẽ không.
-    private var recoveryWatchdog: DispatchWorkItem?
-    /// Đã kết luận (đang vẽ) → không làm gì thêm.
-    private var recoverySettled = false
-    /// Đang trong một chu trình phục hồi (tránh chạy chồng: willEnterForeground
-    /// + didBecomeActive + scenePhase đều có thể bắn cùng lúc).
-    private var recoveryInProgress = false
-    /// Số lần phục hồi trong một lượt foreground (chống lặp vô hạn).
+    private var savedLifecycleStateJSON: String?
+    private var savedLifecycleStateAt: Date?
+    private var contentProcessTerminated = false
+    private var foregroundRestoreNeeded = false
+    private var foregroundRestoreScheduled = false
+    private var foregroundRestoreInProgress = false
+    private var queuedRestoreReason: String?
+    private var lifecycleEpoch = 0
     private var recoveryAttempts = 0
-    /// Tối đa 3 lần: nạp lại → kiểm tra → nạp lại …
-    private static let recoveryAttemptLimit = 3
-    /// Chờ trang nạp xong trước khi kiểm tra có vẽ hay không.
-    private static let paintCheckDelay: TimeInterval = 5
+    private var awaitingStateRestoreAfterLoad = false
+    private static let maximumRecoveryAttempts = 2
+    private static let foregroundProbeTimeout: TimeInterval = 1.5
 
-    /// Hộp cờ dùng chung cho các closure (tránh bắt biến var trong closure
-    /// chạy trên nhiều hàng đợi).
-    private final class FlagBox { var value = false }
+    private final class FlagBox {
+        var value = false
+    }
 
     private func installLifecycleObservers() {
         let center = NotificationCenter.default
-        let handler: (Notification) -> Void = { [weak self] _ in
-            self?.handleAppDidReturnFromBackground()
-        }
         lifecycleObservers.append(center.addObserver(
-            forName: UIApplication.willEnterForegroundNotification,
-            object: nil, queue: .main, using: handler))
+            forName: .binTVApplicationWillResignActive,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.applicationWillResignActive()
+        })
         lifecycleObservers.append(center.addObserver(
-            forName: UIApplication.didBecomeActiveNotification,
-            object: nil, queue: .main, using: handler))
+            forName: .binTVApplicationDidEnterBackground,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.applicationDidEnterBackground()
+        })
+        lifecycleObservers.append(center.addObserver(
+            forName: .binTVApplicationWillEnterForeground,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.applicationWillEnterForeground()
+        })
+        lifecycleObservers.append(center.addObserver(
+            forName: .binTVApplicationDidBecomeActive,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.applicationDidBecomeActive()
+        })
+        lifecycleObservers.append(center.addObserver(
+            forName: .binTVScenePhaseDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            self?.scenePhaseDidChange(notification)
+        })
     }
 
-    // ---------------------------------------------------------------------
-    // App vừa trở lại foreground/active: PHẢI chứng minh webview còn sống và
-    // đang VẼ, nếu không → nạp lại. Đây là điểm mấu chốt của bản 225:
-    // ở bản 224, nếu `evaluateJavaScript` KHÔNG BAO GIỜ gọi về (process đã
-    // chết / trang bị kẹt giữa chừng lúc ở nền) thì không có gì xảy ra cả →
-    // màn hình đen vĩnh viễn đúng như máy thật. Nay mọi đường đều có hạn mức.
-    // ---------------------------------------------------------------------
-    /// [build 228] App vừa trở lại foreground — xử lý THEO ĐÚNG LIFECYCLE:
-    /// không reload mù quáng. Quy trình: ép vẽ → **ĐO** trạng thái render
-    /// thật của trang → chỉ can thiệp khi có bằng chứng (lưới trống / browser
-    /// bị ẩn / webview không phản hồi), theo thứ tự từ nhẹ đến nặng:
-    ///   1. gỡ class `player-active` (browser đang bị ẩn → nhìn như màn đen);
-    ///   2. làm mới dữ liệu bằng CHÍNH luồng của web app (chọn lại danh mục)
-    ///      — giữ nguyên mọi trạng thái, không reload;
-    ///   3. nạp lại trang (bỏ cache) + kiểm tra server nội bộ;
-    ///   4. bỏ cuộc → hiện overlay "Thử lại" thay vì để người dùng nhìn đen.
-    private func handleAppDidReturnFromBackground() {
-        guard started else { return }          // tab PHIM chưa từng mở → thôi
-        guard !recoveryInProgress else { return }
-        recoveryInProgress = true
-        recoveryAttempts = 0
-        // Khoá an toàn: luôn mở lại chu trình sau 40s (tránh kẹt).
-        DispatchQueue.main.asyncAfter(deadline: .now() + 40) { [weak self] in
-            self?.recoveryInProgress = false
+    private func applicationWillResignActive() {
+        guard started else { return }
+        lifecycleEpoch += 1
+        // Any in-flight evaluateJavaScript callback belongs to the old active
+        // epoch. It must not block the next didBecomeActive recovery.
+        foregroundRestoreScheduled = false
+        foregroundRestoreInProgress = false
+        queuedRestoreReason = nil
+        foregroundRestoreNeeded = true
+        nativePlayer.applicationWillResignActive()
+        PhimDebugLog.step("LIFECYCLE", "PHIM willResignActive", "snapshot")
+        captureLifecycleState(reason: "willResignActive")
+    }
+
+    private func applicationDidEnterBackground() {
+        guard started else { return }
+        foregroundRestoreNeeded = true
+        nativePlayer.applicationDidEnterBackground()
+        PhimDebugLog.step("LIFECYCLE", "PHIM didEnterBackground", "snapshot")
+        // This second request is deliberately best effort. The document-start
+        // bridge has already sent a synchronous snapshot on visibilitychange.
+        captureLifecycleState(reason: "didEnterBackground")
+    }
+
+    private func applicationWillEnterForeground() {
+        guard started else { return }
+        foregroundRestoreNeeded = true
+        PhimDebugLog.step("LIFECYCLE", "PHIM willEnterForeground", "defer",
+                          "waiting for didBecomeActive before touching WKWebView")
+    }
+
+    private func applicationDidBecomeActive() {
+        guard started else { return }
+        nativePlayer.applicationDidBecomeActive()
+        scheduleForegroundRepair(reason: "didBecomeActive")
+    }
+
+    private func scenePhaseDidChange(_ notification: Notification) {
+        guard started,
+              let phase = notification.userInfo?["phase"] as? String else { return }
+        switch phase {
+        case "inactive":
+            foregroundRestoreNeeded = true
+            captureLifecycleState(reason: "sceneInactive")
+        case "background":
+            foregroundRestoreNeeded = true
+        case "active":
+            scheduleForegroundRepair(reason: "scenePhaseActive")
+        default:
+            break
         }
-        // Bước 0: ép vẽ lại (rẻ, không mất trạng thái) rồi mới đo.
+    }
+
+    /// Save state before suspension without writing signed stream URLs to logs.
+    /// The value is in-memory only; sessionStorage keeps the equivalent state
+    /// inside a surviving page. This avoids persisting temporary source tokens.
+    private func captureLifecycleState(reason: String) {
+        guard started, !contentProcessTerminated else { return }
+        let view = webView
+        let generation = webViewGeneration
+        let js = """
+        (function () {
+            try {
+                var host = window.__bintvPhimHostLifecycle;
+                var state = host && typeof host.capture === 'function'
+                    ? host.capture('native-\(reason)') : null;
+                return JSON.stringify(state || {});
+            } catch (e) { return ''; }
+        })()
+        """
+        view.evaluateJavaScript(js) { [weak self, weak view] value, error in
+            guard let self = self, let view = view,
+                  self.webView === view, self.webViewGeneration == generation else { return }
+            guard error == nil, let text = value as? String, !text.isEmpty else {
+                PhimDebugLog.step("LIFECYCLE", "snapshot", "skip",
+                                  "reason=\(reason) evaluator unavailable")
+                return
+            }
+            self.saveLifecycleState(text, reason: reason)
+        }
+    }
+
+    /// Called by the document-start bridge on visibilitychange/pagehide. This
+    /// is earlier and more reliable than an asynchronous evaluateJavaScript
+    /// call when Safari backgrounds the app quickly.
+    private func handleLifecycleBridge(_ body: Any?) {
+        guard let dictionary = body as? [String: Any] else { return }
+        let action = (dictionary["action"] as? String) ?? "unknown"
+        switch action {
+        case "snapshot":
+            let reason = (dictionary["reason"] as? String) ?? "web"
+            if let state = dictionary["state"] {
+                saveLifecycleState(state, reason: "web-\(reason)")
+            }
+        case "pageshow":
+            PhimDebugLog.step("LIFECYCLE", "web pageshow", "event")
+        default:
+            PhimDebugLog.step("LIFECYCLE", "web bridge", "ignored", action)
+        }
+    }
+
+    private func saveLifecycleState(_ value: Any, reason: String) {
+        let json: String?
+        if let text = value as? String {
+            json = text
+        } else if JSONSerialization.isValidJSONObject(value),
+                  let data = try? JSONSerialization.data(withJSONObject: value, options: []),
+                  let text = String(data: data, encoding: .utf8) {
+            json = text
+        } else {
+            json = nil
+        }
+        guard let json = json, !json.isEmpty else { return }
+        savedLifecycleStateJSON = json
+        savedLifecycleStateAt = Date()
+        PhimDebugLog.step("LIFECYCLE", "snapshot", "saved",
+                          "reason=\(reason) \(lifecycleStateSummary(json))")
+    }
+
+    private func lifecycleStateSummary(_ json: String) -> String {
+        guard let data = json.data(using: .utf8),
+              let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return "state=unparseable"
+        }
+        let screen = (state["screen"] as? String) ?? "?"
+        let selected = state["selectedMovie"] as? [String: Any]
+        let movieID = (selected?["id"] as? String) ?? "-"
+        let source = state["source"] as? [String: Any]
+        let sourceURL = (source?["url"] as? String) ?? ""
+        let sourceHost = URL(string: sourceURL)?.host ?? (sourceURL.isEmpty ? "-" : "local")
+        let player = state["player"] as? [String: Any]
+        let position = (player?["positionMs"] as? NSNumber)?.intValue ?? 0
+        return "screen=\(screen) movie=\(movieID.prefix(48)) sourceHost=\(sourceHost) positionMs=\(position)"
+    }
+
+    /// Called by the UIViewRepresentable host after it attaches the current
+    /// web view with real constraints. A missing window/superview is treated as
+    /// a recovery signal only after the scene becomes active.
+    func webViewDidAttachToContainer() {
+        let size = webView.bounds.size
+        PhimDebugLog.step("WEBVIEW", "hostAttach", "ok",
+                          "generation=\(webViewGeneration) frame=\(Int(size.width))x\(Int(size.height)) hierarchy=\(webHierarchy())")
+        if foregroundRestoreNeeded, isApplicationActive {
+            scheduleForegroundRepair(reason: "webViewAttached")
+        }
+    }
+
+    /// A normal PHIM ↔ LIVE TV tab switch keeps the same WKWebView mounted.
+    /// Repaint the layer only; state restoration is reserved for a detected
+    /// dead/empty view so a prior lifecycle snapshot cannot overwrite a newer
+    /// movie selection made after returning to the tab.
+    func noteTabDidAppear() {
+        guard started else { return }
         repaintWebView()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-            self?.assessAndRecover()
+        guard contentProcessTerminated || webView.url == nil else {
+            PhimDebugLog.step("WEBVIEW", "tabDidAppear", "repaint",
+                              "generation=\(webViewGeneration) retained=true")
+            return
+        }
+        foregroundRestoreNeeded = true
+        scheduleForegroundRepair(reason: "tabDidAppearInvalidView", delay: 0.05)
+    }
+
+    private var isApplicationActive: Bool {
+        UIApplication.shared.applicationState == .active
+    }
+
+    private func scheduleForegroundRepair(reason: String, delay: TimeInterval = 0.25) {
+        guard started else { return }
+        guard isApplicationActive else {
+            foregroundRestoreNeeded = true
+            PhimDebugLog.step("LIFECYCLE", "foregroundRepair", "defer",
+                              "reason=\(reason) appState=\(UIApplication.shared.applicationState.rawValue)")
+            return
+        }
+        guard foregroundRestoreNeeded || contentProcessTerminated || awaitingStateRestoreAfterLoad else { return }
+        if foregroundRestoreInProgress || foregroundRestoreScheduled {
+            queuedRestoreReason = reason
+            PhimDebugLog.step("LIFECYCLE", "foregroundRepair", "coalesced", reason)
+            return
+        }
+        foregroundRestoreScheduled = true
+        let epoch = lifecycleEpoch
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self = self, self.lifecycleEpoch == epoch else { return }
+            self.foregroundRestoreScheduled = false
+            self.beginForegroundRepair(reason: reason, epoch: epoch)
         }
     }
 
-    /// ĐỌC trạng thái render thật: số thẻ trong lưới · browser có bị ẩn
-    /// (`player-active`) · browser có đang show · bề rộng lưới · dòng trạng
-    /// thái. Đây là "bằng chứng" để quyết định bước xử lý tiếp theo.
-    private func assessAndRecover() {
-        let js = """
-        (function(){
-          try{
-            var grid=document.getElementById('bintv-movie-grid');
-            var cards=grid?grid.querySelectorAll('.movie-card').length:-1;
-            var browser=document.getElementById('bintv-movie-browser');
-            var shown=!!(browser&&browser.classList.contains('show'));
-            var hidden=!!(browser&&browser.classList.contains('player-active'));
-            var st=document.getElementById('bintv-movie-status');
-            var status=(st&&st.textContent||'').slice(0,60);
-            var w=grid?Math.round(grid.getBoundingClientRect().width):-1;
-            return String(cards)+'|'+(shown?1:0)+'|'+(hidden?1:0)+'|'+String(w)+'|'+status;
-          }catch(e){return 'ERR';}
-        })()
-        """
+    /// The decision tree intentionally starts with the least invasive action:
+    /// repaint + probe a live page. It recreates only a terminated, detached,
+    /// external-navigated, or non-responsive WKWebView.
+    private func beginForegroundRepair(reason: String, epoch: Int) {
+        guard started, isApplicationActive, lifecycleEpoch == epoch else { return }
+        guard !foregroundRestoreInProgress else {
+            queuedRestoreReason = reason
+            return
+        }
+        foregroundRestoreInProgress = true
+        recoveryAttempts = 0
+        PhimDebugLog.step("LIFECYCLE", "foregroundRepair", "begin",
+                          "reason=\(reason) processTerminated=\(contentProcessTerminated) generation=\(webViewGeneration)")
+
+        if !hasUsableWebViewHierarchy() {
+            waitForWebViewAttachment(reason: reason, epoch: epoch, attempt: 0)
+            return
+        }
+        if contentProcessTerminated {
+            rebuildWebView(reason: "WebContent process terminated")
+            return
+        }
+        guard let url = webView.url, isLocalPhimPage(url) else {
+            rebuildWebView(reason: webView.url == nil ? "WKWebView has no page URL" : "WKWebView left local PHIM page")
+            return
+        }
+        probeLiveWebView(reason: reason, epoch: epoch)
+    }
+
+    private func waitForWebViewAttachment(reason: String, epoch: Int, attempt: Int) {
+        guard lifecycleEpoch == epoch, isApplicationActive else {
+            finishForegroundRepair(expectedEpoch: epoch)
+            return
+        }
+        if hasUsableWebViewHierarchy() {
+            beginForegroundRepairAfterAttachment(reason: reason, epoch: epoch)
+            return
+        }
+        guard attempt < 3 else {
+            PhimDebugLog.step("WEBVIEW", "hierarchy", "missing",
+                              "superview/window unavailable after foreground; recreating")
+            rebuildWebView(reason: "view hierarchy missing after foreground")
+            return
+        }
+        PhimDebugLog.step("WEBVIEW", "hierarchy", "waiting",
+                          "attempt=\(attempt + 1) hierarchy=\(webHierarchy())")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
+            self?.waitForWebViewAttachment(reason: reason, epoch: epoch, attempt: attempt + 1)
+        }
+    }
+
+    private func beginForegroundRepairAfterAttachment(reason: String, epoch: Int) {
+        guard lifecycleEpoch == epoch, isApplicationActive else {
+            finishForegroundRepair(expectedEpoch: epoch)
+            return
+        }
+        if contentProcessTerminated || webView.url == nil || !(webView.url.map { self.isLocalPhimPage($0) } ?? false) {
+            rebuildWebView(reason: contentProcessTerminated ? "terminated while waiting for host" : "invalid page after host attach")
+        } else {
+            probeLiveWebView(reason: reason, epoch: epoch)
+        }
+    }
+
+    private func probeLiveWebView(reason: String, epoch: Int) {
+        let view = webView
+        let generation = webViewGeneration
         let answered = FlagBox()
-        webView.evaluateJavaScript(js) { [weak self] result, error in
-            guard let self = self else { return }
-            answered.value = true
-            let text = (result as? String) ?? ""
-            let parts = text.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
-            let cards = Int(parts.count > 0 ? parts[0] : "-1") ?? -1
-            let shown = parts.count > 1 ? parts[1] == "1" : false
-            let hidden = parts.count > 2 ? parts[2] == "1" : false
-            let width = Int(parts.count > 3 ? parts[3] : "-1") ?? -1
-            let status = parts.count > 4 ? parts[4] : ""
-            PhimDebugLog.step("WEBVIEW", "assess", "ok",
-                               "cards=\(cards) shown=\(shown) hidden=\(hidden) gridW=\(width) status=\(status)")
-            if error != nil || text == "ERR" || cards < 0 {
-                // Không đọc được trang = webview đã chết → nạp lại.
-                self.reloadPage(reason: "không đọc được trạng thái trang (cards=\(cards))")
-                return
-            }
-            if hidden {
-                // (1) Browser đang bị ẨN bởi class player-active → gỡ lớp này
-                // (đúng nguyên nhân, không cần nạp lại).
-                self.webView.evaluateJavaScript(
-                    "document.getElementById('bintv-movie-browser').classList.remove('player-active'); 'ok'"
-                ) { _, _ in }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-                    self?.reassessAfterFix()
-                }
-                return
-            }
-            if cards == 0 || !shown {
-                // (2) LƯỚI TRỐNG / browser chưa show → đúng triệu chứng
-                // "màn hình đen": làm mới bằng chính luồng của web app.
-                self.softRefresh()
-                return
-            }
-            // Có nội dung: chỉ cần chắc chắn nó đang được vẽ.
-            self.verifyPainting()
-        }
-        // Webview chết thì evaluateJavaScript KHÔNG BAO GIỜ gọi về → hạn mức.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            guard let self = self, !answered.value else { return }
-            self.reloadPage(reason: "webview không phản hồi khi đo trạng thái render")
-        }
-    }
-
-    /// (2) Làm mới DỮ LIỆU bằng chính luồng của web app: bấm lại danh mục
-    /// đang chọn → app.js render lại lưới. KHÔNG reload, KHÔNG mất trạng thái.
-    private func softRefresh() {
+        repaintWebView()
         let js = """
-        (function(){
-          try{
-            var row=document.querySelector('.movie-catalog-row.selected');
-            if(row){ row.click(); return 'selected'; }
-            var rows=document.querySelectorAll('.movie-catalog-row');
-            if(rows.length){ rows[0].click(); return 'first'; }
-            var btn=document.querySelector(".movie-filter-button[data-movie-filter='all']");
-            if(btn){ btn.click(); return 'all'; }
-            return 'no-target';
-          }catch(e){return 'ERR';}
+        (function () {
+            try {
+                return JSON.stringify({
+                    ready: document.readyState,
+                    body: !!document.body,
+                    api: !!(window.__bintvPhimLifecycle && window.__bintvPhimLifecycle.restore),
+                    browserOpen: !!(document.getElementById('bintv-movie-browser')
+                        && document.getElementById('bintv-movie-browser').classList.contains('show')),
+                    playerOpen: !!(document.getElementById('bintv-movie-player')
+                        && document.getElementById('bintv-movie-player').classList.contains('show')),
+                    width: Math.round(window.innerWidth || 0),
+                    height: Math.round(window.innerHeight || 0)
+                });
+            } catch (e) { return ''; }
         })()
         """
-        webView.evaluateJavaScript(js) { [weak self] result, _ in
-            guard let self = self else { return }
-            PhimDebugLog.step("WEBVIEW", "softRefresh", "ok", (result as? String) ?? "?")
-            // Chờ web app tải & render lại, rồi ĐO LẠI.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-                self?.reassessAfterFix()
+        view.evaluateJavaScript(js) { [weak self, weak view] value, error in
+            guard let self = self, let view = view,
+                  self.webView === view,
+                  self.webViewGeneration == generation,
+                  self.lifecycleEpoch == epoch else { return }
+            answered.value = true
+            guard self.isApplicationActive else {
+                self.finishForegroundRepair(expectedEpoch: epoch)
+                return
             }
-        }
-    }
-
-    /// Đo lại SAU khi đã xử lý (gỡ player-active / làm mới danh mục):
-    /// có thẻ phim → xong (không reload); vẫn trống → nạp lại trang.
-    private func reassessAfterFix() {
-        webView.evaluateJavaScript(
-            "String(document.querySelectorAll('#bintv-movie-grid .movie-card').length)"
-        ) { [weak self] value, _ in
-            guard let self = self else { return }
-            let cards = Int((value as? String) ?? "-1") ?? -1
-            if cards > 0 {
-                PhimDebugLog.step("WEBVIEW", "reassess", "ok", "đã render lại \(cards) thẻ — không cần nạp lại")
-                self.repaintWebView()
-                self.settleRecovery()
-            } else {
-                self.reloadPage(reason: "lưới vẫn trống sau khi làm mới (cards=\(cards))")
+            guard error == nil, let result = value as? String, !result.isEmpty else {
+                self.rebuildWebView(reason: "live page probe returned an error")
+                return
             }
-        }
-    }
-
-
-
-
-    /// Bắt đầu một lượt kiểm tra có HẠN MỨC: watchdog 3s + thăm dò DOM +
-    /// kiểm tra có thật sự vẽ khung hình hay không (requestAnimationFrame).
-
-
-    /// Webview đã được chứng minh là sống & đang vẽ → huỷ watchdog.
-    private func settleRecovery() {
-        recoverySettled = true
-        recoveryInProgress = false
-        recoveryWatchdog?.cancel()
-        recoveryWatchdog = nil
-    }
-
-    /// Socket nghe có thể bị hệ thống đóng lúc app ở nền → khởi lại nếu cần.
-    private func ensureServerAlive() {
-        let server = PhimLocalServer.shared
-        self.server = server
-        guard server.port <= 0 else { return }
-        PhimDebugLog.step("SERVER", "restartOnForeground", "begin", "port=0 (socket bị đóng khi ở nền)")
-        server.onPortReady = { [weak self] port in
-            PhimDebugLog.step("SERVER", "restartOnForeground", "ok", "port=\(port)")
-            self?.loadPage()
-        }
-        server.onPortFailed = { [weak self] message in
-            PhimDebugLog.step("SERVER", "restartOnForeground", "FAIL", message)
-            self?.failMessage = message
-            self?.loadFailed = true
-        }
-        server.start()
-        armServerTimeout()
-    }
-
-    /// Ép WKWebView vẽ lại (rẻ, không reload, không mất trạng thái).
-    private func repaintWebView() {
-        webView.setNeedsLayout()
-        webView.setNeedsDisplay()
-        // Nudge scroll 1px: kỹ thuật bắt WebKit vẽ lại khung hình khi webview
-        // bị "treo" sau khi app ở nền (không đổi nội dung, không mất trạng thái).
-        let offset = webView.scrollView.contentOffset
-        webView.scrollView.setContentOffset(CGPoint(x: offset.x, y: offset.y + 1), animated: false)
-        webView.scrollView.setContentOffset(offset, animated: false)
-    }
-
-    /// Hỏi thăm DOM: nếu webview trống/không phản hồi → nạp lại; nếu còn nội
-    /// dung → kiểm tra tiếp xem có THẬT SỰ vẽ hay không.
-
-
-    /// Chứng minh webview THẬT SỰ đang vẽ: đếm khung hình bằng
-    /// `requestAnimationFrame` — rAF CHỈ chạy khi WebKit còn render, nên
-    /// "DOM còn sống mà không vẽ" (= màn hình đen) mới bị phát hiện.
-    ///
-    /// Dùng 2 bước `evaluateJavaScript` (API có từ iOS 8, chắc chắn đúng chữ
-    /// ký) thay vì `callAsyncJavaScript`: đặt bộ đếm → đọc lại sau 900ms.
-    private func verifyPainting() {
-        // Bước 1: gắn bộ đếm khung hình (tự dừng sau 5 khung).
-        let install = """
-        window.__bintvPaint = 0;
-        (function tick() {
-            window.__bintvPaint = (window.__bintvPaint || 0) + 1;
-            if (window.__bintvPaint < 5) { requestAnimationFrame(tick); }
-        })();
-        """
-        webView.evaluateJavaScript(install) { [weak self] _, _ in
-            guard let self = self else { return }
-            // Bước 2: đọc lại sau 900ms — nếu WebKit đang vẽ, bộ đếm đã tăng.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
-                guard let self = self else { return }
-                guard !self.recoverySettled else { return }
-                self.webView.evaluateJavaScript("String(window.__bintvPaint || 0)") { [weak self] value, error in
-                    guard let self = self else { return }
-                    guard !self.recoverySettled else { return }
-                    let frames = Int((value as? String) ?? "") ?? 0
-                    if error == nil && frames >= 2 {
-                        // Đang vẽ bình thường → giữ nguyên, KHÔNG reload.
-                        self.settleRecovery()
-                    } else {
-                        self.reloadPage(reason: "không có khung hình nào được vẽ (rAF không chạy, frames=\(frames)) sau khi ở nền")
-                    }
+            PhimDebugLog.step("WEBVIEW", "foregroundProbe", "ok",
+                              "reason=\(reason) \(self.safeProbeSummary(result))")
+            if self.livePageNeedsStateRestore(result) {
+                if self.contentProcessTerminated {
+                    self.rebuildWebView(reason: "live page state API unavailable")
+                } else {
+                    PhimDebugLog.step("WEBVIEW", "foregroundProbe", "restore",
+                                      "live document lost PHIM screen state")
+                    self.restorePageStateWhenReady(rebuilt: false, epoch: epoch, attempt: 0)
                 }
+            } else {
+                // A responsive page still owns its player/browser state. Do
+                // not replay a source or reload merely because it foregrounded.
+                self.foregroundRestoreNeeded = false
+                self.repaintWebView()
+                self.finishForegroundRepair(expectedEpoch: epoch)
             }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.foregroundProbeTimeout) { [weak self, weak view] in
+            guard let self = self, let view = view,
+                  self.webView === view,
+                  self.webViewGeneration == generation,
+                  self.lifecycleEpoch == epoch,
+                  !answered.value,
+                  self.isApplicationActive else { return }
+            self.rebuildWebView(reason: "WKWebView did not answer foreground probe")
         }
     }
 
-    /// Nạp lại TRANG (không reload bừa): webview mất cả URL → load lại từ
-    /// server; còn URL → reload (giữ localStorage, khôi phục nhanh).
-    /// Nạp lại TRANG — BỎ QUA CACHE, có kiểm tra server và leo thang.
-    private func reloadPage(reason: String) {
-        guard recoveryAttempts < Self.recoveryAttemptLimit else {
-            // Hết cách tự cứu: hiện overlay lỗi + nút "Thử lại" thay vì để
-            // người dùng nhìn mãi màn hình đen.
-            recoveryWatchdog?.cancel()
-            recoveryWatchdog = nil
-            recoveryInProgress = false
-            PhimDebugLog.step("WEBVIEW", "foregroundRestore", "GIVEUP",
-                               "đã thử \(recoveryAttempts) lần — hiện nút Thử lại")
-            failMessage = "Không tự khôi phục được trang Phim sau khi ứng dụng ở nền."
+    private func safeProbeSummary(_ result: String) -> String {
+        guard let data = result.data(using: .utf8),
+              let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return "probe=unparseable"
+        }
+        let ready = (value["ready"] as? String) ?? "?"
+        let body = (value["body"] as? Bool) ?? false
+        let api = (value["api"] as? Bool) ?? false
+        let browserOpen = (value["browserOpen"] as? Bool) ?? false
+        let playerOpen = (value["playerOpen"] as? Bool) ?? false
+        let width = (value["width"] as? NSNumber)?.intValue ?? 0
+        let height = (value["height"] as? NSNumber)?.intValue ?? 0
+        return "ready=\(ready) body=\(body) api=\(api) browser=\(browserOpen) player=\(playerOpen) viewport=\(width)x\(height)"
+    }
+
+    /// A live page is restored only if its DOM contradicts the snapshot that
+    /// was captured before backgrounding. This catches an unexpected legacy
+    /// cleanup without restarting a healthy HTML5/native player on every
+    /// foreground event.
+    private func livePageNeedsStateRestore(_ probe: String) -> Bool {
+        guard let saved = savedLifecycleStateJSON,
+              let savedData = saved.data(using: .utf8),
+              let expected = try? JSONSerialization.jsonObject(with: savedData) as? [String: Any],
+              let probeData = probe.data(using: .utf8),
+              let actual = try? JSONSerialization.jsonObject(with: probeData) as? [String: Any] else {
+            return false
+        }
+        let expectedBrowser = (expected["browserOpen"] as? Bool) ?? false
+        let expectedPlayer = ((expected["player"] as? [String: Any])?["open"] as? Bool) ?? false
+        let actualBrowser = (actual["browserOpen"] as? Bool) ?? false
+        let actualPlayer = (actual["playerOpen"] as? Bool) ?? false
+        let hasAPI = (actual["api"] as? Bool) ?? false
+        if (expectedBrowser && !actualBrowser) || (expectedPlayer && !actualPlayer) {
+            // If the page itself is alive but app.js did not initialise, force
+            // a fresh host page rather than endlessly calling a missing API.
+            if !hasAPI {
+                PhimDebugLog.step("WEBVIEW", "foregroundProbe", "API_MISSING",
+                                  "screen mismatch requires a fresh page")
+                contentProcessTerminated = true
+            }
+            return true
+        }
+        return false
+    }
+
+    private func rebuildWebView(reason: String) {
+        guard isApplicationActive else {
+            foregroundRestoreNeeded = true
+            finishForegroundRepair()
+            return
+        }
+        guard recoveryAttempts < Self.maximumRecoveryAttempts else {
+            foregroundRestoreNeeded = false
+            finishForegroundRepair()
+            failMessage = "Không thể khôi phục WebView Phim sau khi ứng dụng trở lại."
             loadFailed = true
+            PhimDebugLog.step("WEBVIEW", "rebuild", "FAIL", "recovery limit reached: \(reason)")
             return
         }
         recoveryAttempts += 1
-        recoveryWatchdog?.cancel()
-        PhimDebugLog.step("WEBVIEW", "foregroundRestore", "RELOAD", reason)
-        // (1) Server nội bộ còn phục vụ không? (socket có thể bị đóng lúc ở nền)
+        let old = webView
+        detach(old)
+        old.removeFromSuperview()
+        let configuration = Self.makeWebViewConfiguration()
+        let replacement = Self.makeWebView(configuration: configuration)
+        configure(replacement, configuration: configuration)
+        webViewGeneration += 1
+        webView = replacement
+        contentProcessTerminated = false
+        awaitingStateRestoreAfterLoad = true
+        foregroundRestoreNeeded = true
+        PhimDebugLog.step("WEBVIEW", "rebuild", "begin",
+                          "attempt=\(recoveryAttempts) generation=\(webViewGeneration) reason=\(reason) state=\(savedLifecycleStateJSON == nil ? "none" : "saved")")
+        loadFreshPageAfterRecovery()
+        finishForegroundRepair()
+    }
+
+    private func loadFreshPageAfterRecovery() {
+        let server = PhimLocalServer.shared
+        self.server = server
+        let loadWhenReady: (Int) -> Void = { [weak self] port in
+            guard let self = self else { return }
+            PhimDebugLog.step("SERVER", "foregroundRecovery", "ready", "port=\(port)")
+            self.loadPage(cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
+        }
+        let failWhenReady: (String) -> Void = { [weak self] message in
+            guard let self = self else { return }
+            PhimDebugLog.step("SERVER", "foregroundRecovery", "FAIL", message)
+            self.awaitingStateRestoreAfterLoad = false
+            self.failMessage = message
+            self.loadFailed = true
+        }
+        server.onPortReady = loadWhenReady
+        server.onPortFailed = failWhenReady
+        guard server.port > 0 else {
+            server.start()
+            armServerTimeout()
+            return
+        }
         checkServerHealth { [weak self] healthy in
             guard let self = self else { return }
             if healthy {
-                self.hardLoad()
+                self.loadPage(cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
             } else {
-                // (2) Server im lặng → nối lại listener rồi nạp lại.
-                PhimDebugLog.step("SERVER", "health", "FAIL", "server nội bộ không phản hồi → nối lại listener")
-                PhimLocalServer.shared.relaunchListenerIfDead()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-                    self?.hardLoad()
-                }
+                PhimDebugLog.step("SERVER", "foregroundRecovery", "restart",
+                                  "health check failed")
+                server.restartListener()
+                self.armServerTimeout()
             }
         }
     }
 
-    /// Nạp lại THẬT SỰ: yêu cầu **bỏ qua toàn bộ cache** — index.html/CSS/JS
-    /// cũ đang bị cache cũng là một nguyên nhân khiến giao diện không đổi.
-    private func hardLoad() {
-        guard let url = pageURL() else { ensureServerAlive(); return }
-        var request = URLRequest(url: url,
-                                 cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
-                                 timeoutInterval: 30)
-        webView.load(request)
-        // Sau khi trang kịp nạp (5s) → ĐO LẠI TRẠNG THÁI RENDER
-        // (có thẻ phim? browser có bị ẩn?) — không chỉ đếm khung hình.
-        let watchdog = DispatchWorkItem { [weak self] in
-            self?.assessAndRecover()
+    /// A recovered page has to finish loading before app.js exports its state
+    /// API. Retry the *restore call* for a short period; do not reload again
+    /// merely because bootstrap/catalog work is still in progress.
+    private func restorePageStateWhenReady(rebuilt: Bool, epoch: Int, attempt: Int) {
+        guard started, isApplicationActive, lifecycleEpoch == epoch else {
+            finishForegroundRepair(expectedEpoch: epoch)
+            return
         }
-        recoveryWatchdog = watchdog
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.paintCheckDelay,
-                                      execute: watchdog)
+        let view = webView
+        let generation = webViewGeneration
+        let state = savedLifecycleStateJSON ?? "null"
+        let rebuiltLiteral = rebuilt ? "true" : "false"
+        let js = """
+        (function () {
+            try {
+                var api = window.__bintvPhimLifecycle;
+                if (!api || typeof api.restore !== 'function') return 'not-ready';
+                var result = api.restore(\(state), { rebuilt: \(rebuiltLiteral) });
+                return String(result || 'ok');
+            } catch (e) { return 'error:' + String(e && e.message || e); }
+        })()
+        """
+        view.evaluateJavaScript(js) { [weak self, weak view] value, error in
+            guard let self = self, let view = view,
+                  self.webView === view,
+                  self.webViewGeneration == generation,
+                  self.lifecycleEpoch == epoch else { return }
+            let result = error == nil ? ((value as? String) ?? "") : "error"
+            if result == "not-ready", attempt < 24 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                    self?.restorePageStateWhenReady(rebuilt: rebuilt, epoch: epoch, attempt: attempt + 1)
+                }
+                return
+            }
+            self.awaitingStateRestoreAfterLoad = false
+            self.foregroundRestoreNeeded = false
+            if result.hasPrefix("error") || result.isEmpty {
+                PhimDebugLog.step("WEBVIEW", "stateRestore", "warn",
+                                  "result=\(String(result.prefix(160)))")
+            } else {
+                PhimDebugLog.step("WEBVIEW", "stateRestore", "ok",
+                                  "rebuilt=\(rebuilt) result=\(String(result.prefix(160)))")
+            }
+            self.repaintWebView()
+            // The page may have been replaced while AVKit stayed alive. Let
+            // the native player reassert its UI state after app.js has applied
+            // the restored shell; it does not issue a second playback request.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+                self?.nativePlayer.reconcileWebAppState()
+            }
+            self.finishForegroundRepair(expectedEpoch: epoch)
+        }
     }
 
-    /// Hỏi `/health` của server nội bộ (nhanh, 1.2s) — quyết định có cần nối
-    /// lại listener trước khi nạp lại trang hay không.
+    private func finishForegroundRepair(expectedEpoch: Int? = nil) {
+        guard expectedEpoch == nil || expectedEpoch == lifecycleEpoch else { return }
+        foregroundRestoreInProgress = false
+        foregroundRestoreScheduled = false
+        if let queued = queuedRestoreReason {
+            queuedRestoreReason = nil
+            DispatchQueue.main.async { [weak self] in
+                self?.scheduleForegroundRepair(reason: queued, delay: 0.05)
+            }
+        }
+    }
+
+    private func hasUsableWebViewHierarchy() -> Bool {
+        let size = webView.bounds.size
+        return webView.superview != nil && webView.window != nil && size.width > 1 && size.height > 1
+    }
+
+    private func webHierarchy() -> String {
+        var nodes: [String] = []
+        var current: UIView? = webView
+        var count = 0
+        while let node = current, count < 6 {
+            nodes.append(String(describing: type(of: node)))
+            current = node.superview
+            count += 1
+        }
+        return nodes.joined(separator: ">")
+    }
+
+    private func isLocalPhimPage(_ url: URL) -> Bool {
+        let host = url.host?.lowercased() ?? ""
+        guard host == "127.0.0.1" || host == "localhost" else { return false }
+        let expectedPort = server?.port ?? PhimLocalServer.shared.port
+        return expectedPort <= 0 || url.port == expectedPort
+    }
+
+    /// Repaint only. Moving the scroll offset during lifecycle restoration can
+    /// trigger an unwanted player/UI mutation, so no scroll "nudge" is used.
+    private func repaintWebView() {
+        webView.setNeedsLayout()
+        webView.layoutIfNeeded()
+        webView.scrollView.setNeedsLayout()
+        webView.setNeedsDisplay()
+    }
+
+    /// Hỏi `/health` của server nội bộ trước a forced recreation. It is never
+    /// used as a reason to reload an otherwise healthy, responsive web page.
     private func checkServerHealth(completion: @escaping (Bool) -> Void) {
         let server = PhimLocalServer.shared
         self.server = server
@@ -1463,7 +1876,6 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
             DispatchQueue.main.async { completion(ok) }
         }.resume()
     }
-
 
     // =====================================================================
     // Audio session (âm thanh phim — độc lập với tab TUBE)
@@ -1514,94 +1926,167 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     }
 
     // =====================================================================
-    // Navigation delegate — lỗi main frame → overlay "Thử lại"
+    // WKNavigationDelegate / WKUIDelegate
     // =====================================================================
 
-    // ---------------------------------------------------------------------
-    // [FIX 2026-09-12 — ROOT CAUSE "tab PHIM màn hình đen khi quay lại"]
-    // Khi người dùng rời tab PHIM, WKWebView bị tháo khỏi window; dưới áp
-    // lực bộ nhớ hệ thống CÓ THỂ chấm dứt WebContent process của nó. Mặc
-    // định WKWebView khi đó chỉ còn layer ĐEN TRỐNG và KHÔNG tự khôi phục
-    // — bản trước không implement delegate này nên quay lại tab PHIM là
-    // đen vĩnh viễn (đúng triệu chứng người dùng báo: mất trạng thái hiển
-    // thị, màn hình đen hoàn toàn). Đây là cơ chế khôi phục CHÍNH THỨC của
-    // Apple: reload khi process chết. localStorage (websiteDataStore
-    // .default) vẫn còn nên bootstrap/catalog cache của app.js sống sót —
-    // reload phục hồi nhanh, KHÔNG phải tải nguội.
-    // Quan trọng: chỉ reload KHI process thật sự chết — mọi lần chuyển tab
-    // bình thường KHÔNG hề reload (giữ nguyên trạng thái đang xem, đúng
-    // yêu cầu "ưu tiên giữ lại trạng thái PHIM").
-    // ---------------------------------------------------------------------
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        PhimDebugLog.step("WEBVIEW", "webContentProcessDidTerminate", "RELOAD",
-                           "WebContent process bị hệ thống kết thúc — reload phục hồi")
-        // [build 224] App đang Ở NỀN: reload lúc này thường KHÔNG hoàn tất
-        // (và chính là nguyên nhân quay lại chỉ thấy màn đen) → đánh dấu và
-        // phục hồi khi app thật sự trở lại foreground.
-        if UIApplication.shared.applicationState == .active {
-            webView.reload()
-        } else {
-            pendingRestoreAfterBackground = true
+        guard webView === self.webView else { return }
+        contentProcessTerminated = true
+        foregroundRestoreNeeded = true
+        lifecycleEpoch += 1
+        foregroundRestoreScheduled = false
+        foregroundRestoreInProgress = false
+        queuedRestoreReason = nil
+        PhimDebugLog.step("WEBVIEW", "webContentProcessDidTerminate", "detected",
+                          "generation=\(webViewGeneration) appActive=\(isApplicationActive)")
+        // Never reload this instance here. A reload issued while suspended can
+        // finish against a dead rendering surface. The active lifecycle path
+        // creates a correctly configured replacement and restores its state.
+        if isApplicationActive {
+            scheduleForegroundRepair(reason: "webContentProcessDidTerminate", delay: 0.05)
         }
     }
 
-    /// [2026-09-12] Gọi khi tab PHIM hiện trở lại: yêu cầu WKWebView vẽ lại
-    /// layer (setNeedsDisplay) để tránh khung hình stale/tối — hoàn toàn
-    /// KHÔNG reload, không mất trạng thái (chỉ đánh dấu cần vẽ).
-    /// Kèm theo safety-net `restoreIfEmpty()`: chỉ nạp lại trang khi
-    /// webview thật sự trống (bị giải phóng/chưa có nội dung) — đúng yêu
-    /// cầu "nếu view bị giải phóng thì phải khôi phục đúng cách", nhưng
-    /// KHÔNG reload khi cache/trạng thái hiện tại vẫn dùng được.
-    func noteTabDidAppear() {
-        webView.setNeedsDisplay()
-        restoreIfEmpty()
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        guard webView === self.webView else { return }
+        PhimDebugLog.step("NAVIGATION", "didStart", "begin",
+                          PhimDebugLog.sanitizeURL(webView.url?.absoluteString ?? ""))
     }
 
-    /// Số lần đã thử nạp lại trang trống (chống vòng lặp reload vô hạn).
-    private var restoreAttempts = 0
-
-    /// Safety net CHỈ KHI CẦN: webview không có nội dung (`url == nil`,
-    /// không đang tải) mà server nội bộ đã sẵn sàng → nạp lại đúng trang.
-    /// Tối đa 3 lần; reset khi một trang đã tải xong (`didFinish`) →
-    /// chuyển tab bình thường KHÔNG BAO GIỜ reload (giữ nguyên trạng thái
-    /// phim đang xem, đúng yêu cầu "ưu tiên giữ lại trạng thái PHIM").
-    private func restoreIfEmpty() {
-        guard restoreAttempts < 3 else { return }
-        guard !webView.isLoading else { return }
-        guard webView.url == nil else { return }
-        let port = server?.port ?? PhimLocalServer.shared.port
-        guard port > 0 else { return }
-        restoreAttempts += 1
-        PhimDebugLog.step("WEBVIEW", "restoreIfEmpty", "RELOAD",
-                          "webview trống — nạp lại trang (lần \(restoreAttempts))")
-        loadPage()
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        guard webView === self.webView else { return }
+        PhimDebugLog.step("NAVIGATION", "didCommit", "ok",
+                          PhimDebugLog.sanitizeURL(webView.url?.absoluteString ?? ""))
     }
 
-    /// Page load xong → inject lại chiều cao status bar (rotation có thể
-    /// đổi giá trị giữa các lần load).
+    /// Page load completion is the only point at which a rebuilt page receives
+    /// serialized state. A normal navigation does not get an unsolicited
+    /// restore, preventing an old snapshot from overwriting new user actions.
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        PhimDebugLog.step("WEBVIEW", "didFinishNavigation", "ok", PhimDebugLog.sanitizeURL(webView.url?.absoluteString ?? ""))
-        // Trang đã tải xong → webview có nội dung thật: reset bộ đếm
-        // khôi phục (không reload bừa ở những lần chuyển tab kế tiếp).
-        restoreAttempts = 0
+        guard webView === self.webView else { return }
+        PhimDebugLog.step("NAVIGATION", "didFinish", "ok",
+                          PhimDebugLog.sanitizeURL(webView.url?.absoluteString ?? ""))
         injectStatusBarInset()
+        guard awaitingStateRestoreAfterLoad else { return }
+        let epoch = lifecycleEpoch
+        restorePageStateWhenReady(rebuilt: true, epoch: epoch, attempt: 0)
     }
 
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        PhimDebugLog.step("WEBVIEW", "didFailNavigation", "FAIL", error.localizedDescription)
+    func webView(_ webView: WKWebView,
+                 didFail navigation: WKNavigation!,
+                 withError error: Error) {
+        handleNavigationFailure(webView, error: error, phase: "didFail")
+    }
+
+    func webView(_ webView: WKWebView,
+                 didFailProvisionalNavigation navigation: WKNavigation!,
+                 withError error: Error) {
+        handleNavigationFailure(webView, error: error, phase: "didFailProvisional")
+    }
+
+    private func handleNavigationFailure(_ webView: WKWebView, error: Error, phase: String) {
+        guard webView === self.webView else { return }
+        let nsError = error as NSError
+        // Cancelling an external user link is intentional: it opens Safari
+        // while the local PHIM document remains in place. Do not turn that
+        // normal hand-off into a misleading black/error overlay.
+        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
+            PhimDebugLog.step("NAVIGATION", phase, "cancelled", "intentional")
+            return
+        }
+        PhimDebugLog.step("NAVIGATION", phase, "FAIL", error.localizedDescription)
+        awaitingStateRestoreAfterLoad = false
         DispatchQueue.main.async {
             self.failMessage = error.localizedDescription
             self.loadFailed = true
         }
     }
 
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        PhimDebugLog.step("WEBVIEW", "didFailProvisionalNavigation", "FAIL", error.localizedDescription)
-        DispatchQueue.main.async {
-            self.failMessage = error.localizedDescription
-            self.loadFailed = true
+    /// Keep the bundled local PHIM application in this WKWebView. External
+    /// user-activated links (help/login/etc.) continue to use the system
+    /// browser, but stream/source URLs are never force-opened as a workaround.
+    func webView(_ webView: WKWebView,
+                 decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard webView === self.webView else {
+            decisionHandler(.cancel)
+            return
         }
+        guard let url = navigationAction.request.url else {
+            decisionHandler(.cancel)
+            return
+        }
+        if isLocalPhimPage(url) || url.scheme == "about" || url.scheme == "data" {
+            decisionHandler(.allow)
+            return
+        }
+        // A target=_blank navigation is handled once by WKUIDelegate below.
+        // Cancelling it here and opening it as well would race/double-open
+        // Safari on some WebKit versions.
+        if navigationAction.targetFrame == nil {
+            decisionHandler(.allow)
+            return
+        }
+
+        let isUserActivatedLink = navigationAction.navigationType == .linkActivated
+        if isUserActivatedLink, UIApplication.shared.canOpenURL(url) {
+            captureLifecycleState(reason: "externalUserLink")
+            PhimDebugLog.step("NAVIGATION", "externalUserLink", "open",
+                              PhimDebugLog.sanitizeURL(url.absoluteString))
+            UIApplication.shared.open(url, options: [:], completionHandler: nil)
+        } else {
+            PhimDebugLog.step("NAVIGATION", "externalNavigation", "cancel",
+                              "type=\(navigationAction.navigationType.rawValue) "
+                              + PhimDebugLog.sanitizeURL(url.absoluteString))
+        }
+        decisionHandler(.cancel)
     }
+
+    /// target=_blank has no target frame, so WKWebView asks its UIDelegate.
+    /// Preserve normal external-link behavior and snapshot before Safari causes
+    /// applicationWillResignActive. This is deliberately restricted to a link
+    /// activation, never an automatic media/source handoff.
+    func webView(_ webView: WKWebView,
+                 createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction,
+                 windowFeatures: WKWindowFeatures) -> WKWebView? {
+        guard webView === self.webView,
+              navigationAction.navigationType == .linkActivated,
+              let url = navigationAction.request.url,
+              !isLocalPhimPage(url),
+              UIApplication.shared.canOpenURL(url) else { return nil }
+        captureLifecycleState(reason: "externalBlankLink")
+        PhimDebugLog.step("NAVIGATION", "targetBlank", "open",
+                          PhimDebugLog.sanitizeURL(url.absoluteString))
+        UIApplication.shared.open(url, options: [:], completionHandler: nil)
+        return nil
+    }
+
+    func webView(_ webView: WKWebView,
+                 runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping () -> Void) {
+        guard webView === self.webView else {
+            completionHandler()
+            return
+        }
+        guard let presenter = topViewController(from: webView.window?.rootViewController) else {
+            completionHandler()
+            return
+        }
+        let alert = UIAlertController(title: "BinTV Phim", message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler() })
+        presenter.present(alert, animated: true)
+    }
+
+    private func topViewController(from root: UIViewController?) -> UIViewController? {
+        guard let root = root else { return nil }
+        if let presented = root.presentedViewController { return topViewController(from: presented) }
+        if let navigation = root as? UINavigationController { return topViewController(from: navigation.visibleViewController) }
+        if let tab = root as? UITabBarController { return topViewController(from: tab.selectedViewController) }
+        return root
+    }
+
 }
 
 // =====================================================================
@@ -1668,20 +2153,64 @@ struct PhimView: View {
     }
 }
 
-private struct PhimWebViewContainer: UIViewRepresentable {
-    let controller: PhimController
-    let onLongPress: () -> Void
+private final class PhimWebViewHost: UIView {
+    private weak var controller: PhimController?
+    private var installedWebView: WKWebView?
+    private var lastReportedSize: CGSize = .zero
 
-    func makeUIView(context: Context) -> WKWebView {
-        controller.webView
+    init(controller: PhimController) {
+        self.controller = controller
+        super.init(frame: .zero)
+        backgroundColor = .black
+        accessibilityIdentifier = "BinTV.Phim.WebViewHost"
+        install(controller.webView)
     }
 
-    func updateUIView(_ uiView: WKWebView, context: Context) {
-        // Webview do controller sở hữu trọn vẹn (1 instance duy nhất).
-        // Cập nhật callback long-press (nội dung có thể thay đổi).
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    func install(_ webView: WKWebView) {
+        guard installedWebView !== webView else {
+            controller?.webViewDidAttachToContainer()
+            return
+        }
+        installedWebView?.removeFromSuperview()
+        installedWebView = webView
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(webView)
+        NSLayoutConstraint.activate([
+            webView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            webView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            webView.topAnchor.constraint(equalTo: topAnchor),
+            webView.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+        setNeedsLayout()
+        controller?.webViewDidAttachToContainer()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard bounds.size != lastReportedSize else { return }
+        lastReportedSize = bounds.size
+        controller?.webViewDidAttachToContainer()
+    }
+}
+
+private struct PhimWebViewContainer: UIViewRepresentable {
+    @ObservedObject var controller: PhimController
+    let onLongPress: () -> Void
+
+    func makeUIView(context: Context) -> PhimWebViewHost {
+        PhimWebViewHost(controller: controller)
+    }
+
+    func updateUIView(_ uiView: PhimWebViewHost, context: Context) {
+        // The host owns the constraints and can atomically swap a terminated
+        // WKWebView for the controller's replacement without rebuilding the
+        // surrounding SwiftUI tab hierarchy.
+        uiView.install(controller.webView)
         controller.onLongPress = onLongPress
-        // Re-inject chiều cao status bar thật sau mỗi layout pass (xoay
-        // màn hình / thay đổi kích thước → giá trị an toàn mới).
         controller.injectStatusBarInsetPublic()
     }
 }
