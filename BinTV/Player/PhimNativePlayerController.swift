@@ -49,6 +49,16 @@ import UIKit
 // LIVE TV (1 URL, trạng thái @Published cho SwiftUI, không có cơ chế thử
 // nhiều ứng viên / không tự present). Giữ 2 file độc lập để KHÔNG đụng
 // vào hành vi LIVE TV đang chạy tốt.
+//
+// [build 233 — 2026-09-14] LUỒNG KẾT THÚC PHÁT (yêu cầu mới):
+//   * Phim BỘ: tập phát hết → JS tự nạp tập tiếp theo (play() mới thay
+//     item trên CÙNG player đang mở); người dùng đóng player → JS quay
+//     về giao diện CHỌN TẬP.
+//   * Phim LẺ: phát hết hoặc đóng → JS quay về giao diện PHIM (lưới phim).
+//   * CHỐNG TREO: observer DidPlayToEndTime bắn onEnded cho JS; JS có
+//     endedGraceTimeout (10s, hoặc 45s khi đã báo prepareNext) để trả lời
+//     — im lặng quá hạn → TỰ ĐÓNG player + bắn onClosed. Trình phát không
+//     bao giờ đứng yên bắt buộc tắt cả app.
 // =====================================================================
 
 /// Một yêu cầu phát phim từ web app (JS → Swift, message `playVideoNative`).
@@ -101,6 +111,11 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
     var onFailure: ((PhimNativePlaybackRequest, String) -> Void)?
     /// Người dùng ĐÓNG player (nút Done / vuốt xuống) — JS dọn UI web.
     var onClosed: ((PhimNativePlaybackRequest) -> Void)?
+    /// [build 233] Item phát HẾT (DidPlayToEndTime) — JS quyết định: phim bộ
+    /// còn tập → tự nạp tập tiếp theo (gửi lại play()); hết tập / phim lẻ →
+    /// gửi stop() để đóng player. Nếu JS im lặng, backstop tự ĐÓNG player
+    /// (không bao giờ để trình phát treo bắt buộc tắt cả app BinTV).
+    var onEnded: ((PhimNativePlaybackRequest) -> Void)?
     /// WebView vừa được tái tạo nhưng player native vẫn sống. Host dùng callback
     /// này để đồng bộ lại lớp UI JS, không phát lại/khởi tạo nguồn thứ hai.
     var onStateReconciled: ((PhimNativePlaybackRequest, TimeInterval, Bool) -> Void)?
@@ -119,7 +134,13 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
 
     private var statusObservation: NSKeyValueObservation?
     private var stallObserver: NSObjectProtocol?
+    /// [build 233] Observer DidPlayToEndTime của item hiện tại.
+    private var endObserver: NSObjectProtocol?
     private var timeoutWork: DispatchWorkItem?
+    /// [build 233] Backstop sau khi phát HẾT: JS im lặng quá lâu → tự đóng.
+    private var endedGraceWork: DispatchWorkItem?
+    /// [build 233] Đang chờ JS quyết định sau khi phát hết (next-tập/đóng).
+    private var waitingForNextInstruction = false
     private var pendingInitialSeek: CMTime?
     private var shouldPlayWhenReady = true
     private var lifecycleResumePosition: CMTime?
@@ -147,6 +168,11 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
 
     /// Thời gian chờ tối đa cho MỘT ứng viên trước khi coi như fail.
     private static let candidateTimeout: TimeInterval = 20
+    /// [build 233] Sau khi phát HẾT: chờ JS quyết định (next-tập/đóng) tối đa
+    /// 10s; khi JS báo "đang nạp tập mới" (prepareNext) thì nới lên 45s — cả
+    /// hai đều tự ĐÓNG player khi hết hạn để chống treo tuyệt đối.
+    private static let endedGraceTimeout: TimeInterval = 10
+    private static let prepareNextTimeout: TimeInterval = 45
 
     /// Player native đang hiện trên màn hình?
     var isPresented: Bool { playerController != nil }
@@ -401,6 +427,16 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
                               "session=\(req.session) candidate=\(candidate.label) — đang buffer, chờ tiếp")
         }
 
+        // [build 233] Phát HẾT (hết tập / hết phim) → báo JS quyết định:
+        // phim bộ còn tập → JS nạp tập kế và gửi play() mới; hết tập / phim
+        // lẻ → JS gửi stop(). Kèm backstop tự đóng nếu JS im lặng (chống treo).
+        endObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
+        ) { [weak self] _ in
+            guard let self = self, self.currentItemIs(item) else { return }
+            self.handleItemDidPlayToEnd()
+        }
+
         activePlayer.replaceCurrentItem(with: item)
         // play() trước khi ready là HỢP LỆ: AVPlayer tự phát khi item sẵn sàng.
         // A restored user-paused player deliberately remains paused.
@@ -449,7 +485,95 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
         timeoutWork = nil
         statusObservation = nil
         removeStallObserver()
+        removeEndObserver()
         loadCandidate(candidateIndex + 1)
+    }
+
+    // =================================================================
+    // [build 233] PHÁT HẾT TẬP/PHIM — tự chuyển tập (phim bộ) / tự đóng
+    // (phim lẻ), kèm backstop chống treo trình phát tuyệt đối.
+    //
+    // Giao thức với app.js:
+    //   1. Item phát hết → bắn onEnded → JS nhận __bintvNativePlaybackEnded.
+    //   2. JS quyết định trong endedGraceTimeout (10s):
+    //        • Phim bộ còn tập: JS gọi action "prepareNext" NGAY (giữ player
+    //          mở, backstop nới lên 45s) rồi nạp stream tập kế → gửi play()
+    //          mới → loadCandidate thay item TRÊN CÙNG player đang hiện.
+    //        • Hết tập / phim lẻ: JS gọi stop() → player đóng ngay, UI quay
+    //          về giao diện chọn tập (phim bộ) hoặc lưới PHIM (phim lẻ).
+    //   3. JS im lặng (WebView chết / kẹt mạng) → backstop TỰ ĐÓNG player và
+    //      bắn onClosed như thể người dùng đóng → KHÔNG BAO GIỜ treo đến mức
+    //      phải tắt cả app BinTV.
+    // =================================================================
+
+    private func handleItemDidPlayToEnd() {
+        guard let current = request, !waitingForNextInstruction, !dismissingByFailure else { return }
+        waitingForNextInstruction = true
+        PhimDebugLog.step("NATIVE", "playToEnd", "ok",
+                          "session=\(current.session) title=\(current.logTitle) — chờ JS quyết định (tập tiếp theo / đóng)")
+        onEnded?(current)
+        armEndedGraceTimer(Self.endedGraceTimeout, stage: "grace")
+    }
+
+    /// JS báo "đang nạp tập tiếp theo — GIỮ player mở" (message action
+    /// "prepareNext"): huỷ grace ngắn, đặt backstop DÀI hơn trong lúc app.js
+    /// hỏi addon lấy stream tập mới. Gọi trên main thread.
+    func prepareNextEpisode() {
+        guard waitingForNextInstruction, let current = request else { return }
+        PhimDebugLog.step("NATIVE", "prepareNext", "ok",
+                          "session=\(current.session) — JS đang nạp tập tiếp theo, giữ player mở")
+        armEndedGraceTimer(Self.prepareNextTimeout, stage: "prepareNext")
+    }
+
+    private func armEndedGraceTimer(_ timeout: TimeInterval, stage: String) {
+        endedGraceWork?.cancel()
+        let session = request?.session ?? ""
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.endedGraceWork = nil
+            guard self.waitingForNextInstruction,
+                  self.request?.session == session else { return }
+            // Ngườii dùng tự phát lại (replay) qua điều khiển hệ thống →
+            // thoát chế độ chờ, KHÔNG tự đóng.
+            if (self.player?.rate ?? 0) > 0 {
+                PhimDebugLog.step("NATIVE", "endedWait-\(stage)", "cancel",
+                                  "người dùng tự phát lại tập hiện tại")
+                self.waitingForNextInstruction = false
+                return
+            }
+            PhimDebugLog.step("NATIVE", "endedWait-\(stage)", "timeout",
+                              "\(Int(timeout))s không nhận được lệnh từ JS → tự đóng (chống treo)")
+            self.autoCloseAfterEnded()
+        }
+        endedGraceWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout, execute: work)
+    }
+
+    /// JS im lặng sau khi phát hết → TỰ ĐÓNG player và bắn onClosed (giống
+    /// hệt người dùng bấm Done) để JS dọn UI — bảo đảm không bao giờ treo.
+    /// dismissingByFailure = true trong lúc dismiss: nếu hệ thống vẫn gọi
+    /// delegate DidDismiss cho dismissal chủ động thì delegate return sớm —
+    /// onClosed chỉ bắn ĐÚNG MỘT LẦN (ở completion dưới).
+    private func autoCloseAfterEnded() {
+        waitingForNextInstruction = false
+        endedGraceWork?.cancel()
+        endedGraceWork = nil
+        let current = request
+        teardownCurrentItem()
+        request = nil
+        dismissingByFailure = true
+        dismissPlayerController { [weak self] in
+            guard let self = self else { return }
+            self.dismissingByFailure = false
+            if let current = current { self.onClosed?(current) }
+        }
+    }
+
+    private func removeEndObserver() {
+        if let observer = endObserver {
+            NotificationCenter.default.removeObserver(observer)
+            endObserver = nil
+        }
     }
 
     private func armCandidateTimeout(_ candidate: Candidate) {
@@ -613,6 +737,11 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
         pendingInitialSeek = nil
         statusObservation = nil
         removeStallObserver()
+        removeEndObserver()
+        // [build 233] hạ trạng thái chờ-quyết-định-sau-khi-hết (nếu có)
+        endedGraceWork?.cancel()
+        endedGraceWork = nil
+        waitingForNextInstruction = false
         removeSubtitleOverlay()     // [build 232] dọn phụ đề khi đổi/đóng nguồn
         if let player = player {
             player.pause()
@@ -723,11 +852,15 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
 
     deinit {
         timeoutWork?.cancel()
+        endedGraceWork?.cancel()
         statusObservation = nil
         if let observer = subtitleTimeObserver {
             player?.removeTimeObserver(observer)
         }
         if let observer = stallObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = endObserver {
             NotificationCenter.default.removeObserver(observer)
         }
     }

@@ -1,11 +1,11 @@
 # BinTV iOS — TrollStore Build (FIXED)
 
-> **Bản mới nhất: 2.5.2 (build 232)** — Phụ đề (Vietsub/OpenSubtitles) giờ
-> hiển thị NGAY TRONG trình phát gốc iOS (AVPlayerViewController), đồng bộ
-> theo thời gian phát — không còn bị "mất phụ đề" khi phim chuyển sang
-> player native (build 231). Chi tiết: mục `### Build 232 (2.5.2)` ở cuối
-> file · Cách lấy file: artifact `BinTV-trollstore-unsigned` (chứa
-> `BinTV.ipa`) của workflow "Build unsigned IPA (TrollStore)".
+> **Bản mới nhất: 2.5.2 (build 233)** — Phim BỘ hết tập TỰ chuyển tập
+> tiếp theo · đóng trình phát phim bộ quay về CHỌN TẬP · phim lẻ hết/đóng
+> quay về giao diện PHIM · trình phát không bao giờ bị "treo" (backstop tự
+> đóng). Chi tiết: mục `### Build 233 (2.5.2)` ở cuối file · Cách lấy file:
+> artifact `BinTV-trollstore-unsigned` (chứa `BinTV.ipa`) của workflow
+> "Build unsigned IPA (TrollStore)".
 
 ## Build by GitHub Actions
 
@@ -446,6 +446,55 @@ AC3/EAC3) nhưng **vẫn không mở được Matroska** — nếu addon CHỈ c
 native cũng báo lỗi thật và app.js thử nguồn kế tiếp; đường đúng cho trường hợp đó là
 addon trả HLS/MP4 (hoặc debrid). Phụ đề (Vietsub/OpenSubtitles) đã được xử lý ở build
 232 — xem `### Build 232 (2.5.2)`.
+
+### Build 233 (2.5.2) — Phim bộ tự chuyển tập · đóng/hết phim quay về đúng giao diện · chống treo trình phát
+
+**Vấn đề:** phim bộ đang xem hết tập thì trình phát đứng yên (không next); đóng
+trình phát luôn về lưới phim (mỗi lần đổi tập phải bấm lại phim từ đầu); trường
+hợp xấu (AVPlayer dừng ở cuối phim / kẹt nguồn) trình phát "treo" tới mức phải
+tắt cả app.
+
+**Hành vi mới (tab PHIM, cả đường web `<video>` lẫn trình phát gốc iOS):**
+
+1. **Phim BỘ (series):**
+   - Tập phát hết → **tự động chuyển sang tập tiếp theo** (giữ nguyên trình phát;
+     trình phát native thay nguồn ngay trên cùng `AVPlayerViewController` đang mở,
+     không nhấp nháy). Phát hết tập cuối → đóng trình phát, về **giao diện CHỌN TẬP**.
+   - NgườI dùng đóng trình phát (Done/vuốt/Back) → về **giao diện CHỌN TẬP**
+     (focus sẵn ở tập vừa xem) thay vì lưới phim như trước.
+2. **Phim LẺ (movie):**
+   - Phát hết hoặc đóng trình phát → về **giao diện PHIM** (lưới phim).
+   - **Chống treo:** mọi nhánh kết thúc đều tự thu player về; trình phát native
+     có thêm backstop tự đóng nếu phía web không trả lời trong 10s (45s khi đang
+     nạp tập mới) — không bao giờ cần tắt cả BinTV để thoát.
+
+**Cách làm (additive, không phá luồng cũ; Android/Tizen/Electron giữ nguyên hành vi
+khi không có cầu nối iOS):**
+
+- `BinTV/Player/PhimNativePlayerController.swift` — observer
+  `AVPlayerItemDidPlayToEndTime` → callback `onEnded` mới → JS; 2 backstop
+  (`endedGraceTimeout` 10s / `prepareNextTimeout` 45s) hết hạn → `autoCloseAfterEnded`
+  tự đóng + bắn `onClosed` (chống double-callback bằng `dismissingByFailure`);
+  API `prepareNextEpisode()` để JS giữ player trong lúc nạp tập mới.
+- `BinTV/Phim/PhimWebView.swift` — nối `onEnded` → `__bintvNativePlaybackEnded`;
+  action mới `prepareNext` (helper JS `__bintvPrepareNextNativeEpisode`).
+- `BinTV/Phim/Web/assets/app.js` —
+  - `__bintvNativePlaybackEnded`: series còn tập → báo prepareNext rồi
+    `playNextMovieEpisode`; hết tập/phim lẻ → `stopMoviePlayback()` (gửi stop cho
+    native) rồi về chọn tập / lưới PHIM. JVHD giữ luồng riêng.
+  - `htmlVideo.onended` (đường web) đi qua `handleMoviePlaybackCompleted` dùng
+    chung — trước đây video hết là player đứng im.
+  - `moviePreferNativePlayer`: native đang hiển thị thì mọi lần phát kế tiếp
+    (next-tập/đổi tập/nguồn dự phòng) tiếp tục đi qua native — `<video>` nằm SAU
+    lớp native nên không được nhận phát.
+  - `movieEpisodeSwitchSerial` + `abortGuard` trong `loadMovieStreams` (chỉ nhánh
+    chuyển tập): đóng player giữa chừng nạp tập → kết quả bị huỷ, player KHÔNG tự
+    bật lại (chống race mạng chậm).
+  - `reopenMovieEpisodePicker()` dùng chung cho: người dùng đóng player web
+    (`handleMovieBackAction`), đóng player native (`__bintvNativePlaybackClosed`),
+    hết tập cuối — phim lẻ no-op.
+- `tests/ios-native-handoff/run.js` — SUITE E (29 test mới) trên jsdom: toàn bộ
+  kịch bản trên + stale-session + race; **138/138 PASS**.
 
 ### Build 232 (2.5.2) — Phụ đề hiển thị NGAY TRONG trình phát native
 
