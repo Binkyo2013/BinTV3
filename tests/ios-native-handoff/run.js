@@ -89,6 +89,7 @@ function makeWindow(url, withBridge) {
     const win = dom.window;
     if (withBridge) {
         win.__posted = [];
+        win.__lifecyclePosted = [];
         win.webkit = {
             messageHandlers: {
                 playVideoNative: {
@@ -97,7 +98,13 @@ function makeWindow(url, withBridge) {
                     }
                 },
                 phimBridge: { postMessage: function () {} },
-                phimConsole: { postMessage: function () {} }
+                phimConsole: { postMessage: function () {} },
+                phimLifecycle: {
+                    postMessage: function (payload) {
+                        win.__lifecyclePosted = win.__lifecyclePosted || [];
+                        win.__lifecyclePosted.push(JSON.parse(JSON.stringify(payload)));
+                    }
+                }
             }
         };
     }
@@ -124,8 +131,9 @@ function scriptList(withHls) {
     const list = [
         { label: "swift:viewportFixJS", code: swiftScripts.viewportFixJS },
         { label: "swift:bridgeShimJS", code: swiftScripts.bridgeShimJS },
-        { label: "swift:consoleCaptureJS", code: swiftScripts.consoleCaptureJS },
-        { label: "swift:nativeHandoffJS", code: swiftScripts.nativeHandoffJS }
+        { label: "swift:nativeHandoffJS", code: swiftScripts.nativeHandoffJS },
+        { label: "swift:lifecycleBridgeJS", code: swiftScripts.lifecycleBridgeJS },
+        { label: "swift:consoleCaptureJS", code: swiftScripts.consoleCaptureJS }
     ];
     if (withHls) {
         list.push({ label: "assets/hls.min.js", code: fs.readFileSync(path.join(ASSETS, "hls.min.js"), "utf8") });
@@ -149,6 +157,9 @@ function suiteA() {
     check("A", "mọi script nạp không lỗi (" + boot.ok.length + ")", boot.bad.length === 0, boot.bad.join(" | "));
 
     check("A", "nativeHandoffJS có trong PhimWebView.swift", typeof swiftScripts.nativeHandoffJS === "string");
+    check("A", "lifecycleBridgeJS có trong PhimWebView.swift", typeof swiftScripts.lifecycleBridgeJS === "string");
+    check("A", "window.__bintvPhimHostLifecycle được cài trước app.js",
+          !!win.__bintvPhimHostLifecycle && typeof win.__bintvPhimHostLifecycle.capture === "function");
     check("A", "window.__bintvIosNativeBridge = true", win.__bintvIosNativeBridge === true);
     check("A", "__bintvNativeBridgeAvailable() = true", win.__bintvNativeBridgeAvailable() === true);
     check("A", "__bintvPlayVideoNative là hàm", typeof win.__bintvPlayVideoNative === "function");
@@ -425,15 +436,128 @@ function suiteC() {
           /contentOverlayView/.test(playerSrc));
 }
 
-// ---------------------------------------------------------------------
-suiteA();
-suiteB();
-suiteC();
-console.log("\n=========================================");
-console.log("PASS: " + pass + "   FAIL: " + fail);
-if (fail) {
-    console.log("\nChi tiết lỗi:");
-    failures.forEach(function (f) { console.log("  - " + f); });
+// =====================================================================
+// SUITE D — lifecycle Safari/Home + state-aware PHIM recovery
+// =====================================================================
+function wait(win, ms) {
+    return new Promise(function (resolve) { win.setTimeout(resolve, ms); });
 }
-console.log("=========================================");
-process.exit(fail ? 1 : 0);
+
+async function suiteD() {
+    console.log("\n=== SUITE D: lifecycle PHIM (Safari/Home/recovery) ===");
+    const win = makeWindow("http://127.0.0.1:3000/?android=phone&ios=landscape", true);
+    const boot = bootWebApp(win, scriptList(false));
+    check("D", "bridge + app.js lifecycle scripts nạp không lỗi", boot.bad.length === 0, boot.bad.join(" | "));
+    check("D", "app.js export state contract capture/restore",
+          !!win.__bintvPhimLifecycle && typeof win.__bintvPhimLifecycle.capture === "function"
+          && typeof win.__bintvPhimLifecycle.restore === "function");
+
+    const saved = {
+        version: 2,
+        browserOpen: true,
+        screen: "player",
+        catalog: { index: 0, identity: "", filterMode: "all", filterIndex: 0, focusArea: "grid", itemIndex: 0 },
+        selectedMovie: { id: "tt-life", type: "movie", name: "Phim Lifecycle", item: { id: "tt-life", type: "movie", name: "Phim Lifecycle" } },
+        episode: { open: false, index: 0, currentIndex: -1, type: "movie", title: "" },
+        player: { open: true, paused: true, positionMs: 12345, native: true },
+        source: {
+            url: "https://cdn.example.com/lifecycle.mkv?token=secret",
+            proxyUrl: "http://127.0.0.1:3000/proxy?url=x",
+            referer: "https://source.example/",
+            title: "Phim Lifecycle",
+            streamInfo: { name: "1080p" },
+            subtitleContext: { id: "tt-life", type: "movie", name: "Phim Lifecycle" },
+            nativeSession: "77"
+        }
+    };
+    const restored = win.__bintvPhimLifecycle.restore(saved, { rebuilt: true });
+    check("D", "fresh WKWebView nhận state restore thay vì reload mù", restored === "restored-rebuilt", restored);
+    await wait(win, 10);
+    const browser = win.document.getElementById("bintv-movie-browser");
+    const player = win.document.getElementById("bintv-movie-player");
+    check("D", "restore giữ browser + player shell", browser.classList.contains("show")
+          && browser.classList.contains("player-active") && player.classList.contains("show"));
+    const roundTrip = win.__bintvPhimLifecycle.capture();
+    check("D", "snapshot giữ screen/phim/source/player", roundTrip.screen === "player"
+          && roundTrip.selectedMovie.id === "tt-life" && roundTrip.source.url === saved.source.url
+          && roundTrip.player.native === true && roundTrip.player.paused === true,
+          JSON.stringify(roundTrip));
+
+    // Safari return path: pagehide is captured and the host's capture-phase
+    // guard prevents the legacy closeMovieBrowser() teardown.
+    win.__lifecyclePosted.length = 0;
+    win.dispatchEvent(new win.Event("pagehide", { bubbles: true }));
+    check("D", "Safari pagehide gửi snapshot qua phimLifecycle",
+          win.__lifecyclePosted.some(function (m) { return m.action === "snapshot" && m.reason === "pagehide"; }),
+          JSON.stringify(win.__lifecyclePosted));
+    check("D", "Safari pagehide không đóng PHIM thành màn đen",
+          browser.classList.contains("show") && player.classList.contains("show"));
+
+    // Home/background uses the same visibility capture. Simulate WebKit's
+    // hidden document first, then the native UIApplication callback capture.
+    Object.defineProperty(win.document, "hidden", { configurable: true, value: true });
+    win.__lifecyclePosted.length = 0;
+    win.document.dispatchEvent(new win.Event("visibilitychange", { bubbles: true }));
+    check("D", "Home visibilitychange gửi snapshot qua phimLifecycle",
+          win.__lifecyclePosted.some(function (m) { return m.action === "snapshot" && m.reason === "visibilitychange"; }),
+          JSON.stringify(win.__lifecyclePosted));
+    check("D", "Home visibilitychange không đóng browser/player",
+          browser.classList.contains("show") && player.classList.contains("show"));
+    Object.defineProperty(win.document, "hidden", { configurable: true, value: false });
+    win.__lifecyclePosted.length = 0;
+    win.__bintvPhimHostLifecycle.capture("willResignActive");
+    check("D", "Home willResignActive snapshot giữ URL/source", win.__lifecyclePosted.length === 1
+          && win.__lifecyclePosted[0].state.source.url === saved.source.url,
+          JSON.stringify(win.__lifecyclePosted));
+    check("D", "state được mirror trong sessionStorage",
+          !!win.__bintvPhimHostLifecycle.readStored());
+
+    // Standalone/non-iOS execution retains its original pagehide cleanup.
+    const standalone = makeWindow("http://127.0.0.1:3000/?android=phone", false);
+    bootWebApp(standalone, scriptList(false));
+    standalone.__bintvPhimLifecycle.restore(saved, { rebuilt: true });
+    await wait(standalone, 10);
+    const standaloneBrowser = standalone.document.getElementById("bintv-movie-browser");
+    const standalonePlayer = standalone.document.getElementById("bintv-movie-player");
+    standalone.dispatchEvent(new standalone.Event("pagehide", { bubbles: true }));
+    check("D", "Android/Windows path vẫn cleanup pagehide cũ",
+          !standaloneBrowser.classList.contains("show") && !standalonePlayer.classList.contains("show"));
+
+    // Native/Swift wiring checks: process death replaces a view; normal tab
+    // changes are repaint-only and do not touch LIVE TV/TUBE/SETTING paths.
+    const swiftSrc = fs.readFileSync(SWIFT_WEBVIEW, "utf8");
+    const nativeSrc = fs.readFileSync(path.join(REPO, "BinTV", "Player", "PhimNativePlayerController.swift"), "utf8");
+    const contentSrc = fs.readFileSync(path.join(REPO, "BinTV", "Views", "ContentView.swift"), "utf8");
+    check("D", "Swift đăng ký handler phimLifecycle + process-death recovery",
+          /add\(self, name: "phimLifecycle"\)/.test(swiftSrc)
+          && /webViewWebContentProcessDidTerminate/.test(swiftSrc)
+          && /rebuildWebView\(reason:/.test(swiftSrc));
+    check("D", "Swift replacement host reattach constraints", /final class PhimWebViewHost/.test(swiftSrc)
+          && /webView\.leadingAnchor\.constraint/.test(swiftSrc)
+          && /@Published private\(set\) var webView/.test(swiftSrc));
+    check("D", "native player snapshot/resume/reconcile state", /applicationWillResignActive/.test(nativeSrc)
+          && /applicationDidBecomeActive/.test(nativeSrc) && /reconcileWebAppState/.test(nativeSrc));
+    check("D", "PHIM↔LIVE/TUBE/SETTING vẫn mount/layer độc lập", /liveTVPage/.test(contentSrc)
+          && /tubePage/.test(contentSrc) && /phimPage/.test(contentSrc) && /settingsPage/.test(contentSrc)
+          && /mountedTabs/.test(contentSrc));
+}
+
+async function main() {
+    suiteA();
+    suiteB();
+    suiteC();
+    await suiteD();
+    console.log("\n=========================================");
+    console.log("PASS: " + pass + "   FAIL: " + fail);
+    if (fail) {
+        console.log("\nChi tiết lỗi:");
+        failures.forEach(function (f) { console.log("  - " + f); });
+    }
+    console.log("=========================================");
+    process.exit(fail ? 1 : 0);
+}
+
+main().catch(function (error) {
+    console.error(error && error.stack || error);
+    process.exit(1);
+});

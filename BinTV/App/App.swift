@@ -1,4 +1,73 @@
 import SwiftUI
+import UIKit
+
+// MARK: - App / Scene lifecycle relay
+//
+// SwiftUI creates the UIWindowScene for this application, but the PHIM host
+// needs an ordered, observable lifecycle signal that is independent of a
+// particular SwiftUI view redraw.  Keeping this relay at the app boundary
+// means Safari hand-offs and Home/background transitions use the same path.
+extension Notification.Name {
+    static let binTVApplicationWillResignActive = Notification.Name("com.bintv.lifecycle.willResignActive")
+    static let binTVApplicationDidEnterBackground = Notification.Name("com.bintv.lifecycle.didEnterBackground")
+    static let binTVApplicationWillEnterForeground = Notification.Name("com.bintv.lifecycle.willEnterForeground")
+    static let binTVApplicationDidBecomeActive = Notification.Name("com.bintv.lifecycle.didBecomeActive")
+    static let binTVScenePhaseDidChange = Notification.Name("com.bintv.lifecycle.scenePhaseDidChange")
+}
+
+final class BinTVLifecycleCenter {
+    static let shared = BinTVLifecycleCenter()
+
+    private init() {}
+
+    func applicationWillResignActive() {
+        publish(.binTVApplicationWillResignActive, label: "applicationWillResignActive")
+    }
+
+    func applicationDidEnterBackground() {
+        publish(.binTVApplicationDidEnterBackground, label: "applicationDidEnterBackground")
+    }
+
+    func applicationWillEnterForeground() {
+        publish(.binTVApplicationWillEnterForeground, label: "applicationWillEnterForeground")
+    }
+
+    func applicationDidBecomeActive() {
+        publish(.binTVApplicationDidBecomeActive, label: "applicationDidBecomeActive")
+    }
+
+    /// ScenePhase is emitted by the root SwiftUI view as an additional scene
+    /// level confirmation.  The app currently disables multiple scenes, but
+    /// this keeps the restoration path correct if that setting changes later.
+    func scenePhaseDidChange(_ phase: ScenePhase) {
+        let phaseName: String
+        switch phase {
+        case .active: phaseName = "active"
+        case .inactive: phaseName = "inactive"
+        case .background: phaseName = "background"
+        @unknown default: phaseName = "unknown"
+        }
+        PhimDebugLog.step("LIFECYCLE", "scenePhase", "event", phaseName)
+        NotificationCenter.default.post(name: .binTVScenePhaseDidChange,
+                                        object: self,
+                                        userInfo: ["phase": phaseName])
+    }
+
+    private func publish(_ name: Notification.Name, label: String) {
+        // UIApplicationDelegate callbacks are delivered on main.  Preserve
+        // that contract if this helper is ever called by a future background
+        // integration.
+        let publishOnMain: () -> Void = {
+            PhimDebugLog.step("LIFECYCLE", label, "event")
+            NotificationCenter.default.post(name: name, object: self)
+        }
+        if Thread.isMainThread {
+            publishOnMain()
+        } else {
+            DispatchQueue.main.async(execute: publishOnMain)
+        }
+    }
+}
 
 @main
 struct BinTVApp: App {
@@ -87,16 +156,30 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // (2a) Safety net launch — thường là no-op (scene đã landscape
         //      do Info.plist landscape-only).
         requestLandscapeAtLaunch(attempt: 0)
-        // (2b) Re-activate monitor: app về foreground mà scene không
-        //      landscape (edge-case hệ thống) → đưa về landscape.
-        NotificationCenter.default.addObserver(
-            forName: UIApplication.didBecomeActiveNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.requestLandscapeIfNotActive()
-        }
+        PhimDebugLog.step("LIFECYCLE", "didFinishLaunching", "ok")
         return true
+    }
+
+    // MARK: UIApplication lifecycle
+    //
+    // Do not ask WKWebView to reload from these callbacks.  They only publish
+    // ordered lifecycle transitions; the PHIM controller snapshots while the
+    // page is still alive and restores only after the scene is active again.
+    func applicationWillResignActive(_ application: UIApplication) {
+        BinTVLifecycleCenter.shared.applicationWillResignActive()
+    }
+
+    func applicationDidEnterBackground(_ application: UIApplication) {
+        BinTVLifecycleCenter.shared.applicationDidEnterBackground()
+    }
+
+    func applicationWillEnterForeground(_ application: UIApplication) {
+        BinTVLifecycleCenter.shared.applicationWillEnterForeground()
+    }
+
+    func applicationDidBecomeActive(_ application: UIApplication) {
+        BinTVLifecycleCenter.shared.applicationDidBecomeActive()
+        requestLandscapeIfNotActive()
     }
 
     /// Request landscape MỘT lần nếu scene active đang không landscape.

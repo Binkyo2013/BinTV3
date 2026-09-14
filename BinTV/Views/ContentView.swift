@@ -76,6 +76,10 @@ import WebKit
 struct ContentView: View {
     @EnvironmentObject var streamService: StreamService
     @EnvironmentObject var networkService: NetworkService
+    /// Scene-level confirmation of foreground/background state.  AppDelegate
+    /// publishes UIApplication callbacks; this covers the UIWindowScene that
+    /// owns the SwiftUI hierarchy as well.
+    @Environment(\.scenePhase) private var scenePhase
 
     /// Trang đang hiển thị (0…3 — semantics BinTVPage, không đổi).
     @State private var selectedTab: Int = BinTVPage.liveTV.rawValue
@@ -146,6 +150,10 @@ struct ContentView: View {
         )
         .onAppear {
             Task { await streamService.loadChannels() }
+            BinTVLifecycleCenter.shared.scenePhaseDidChange(scenePhase)
+        }
+        .onChange(of: scenePhase) { phase in
+            BinTVLifecycleCenter.shared.scenePhaseDidChange(phase)
         }
         .onChange(of: selectedTab) { tab in
             // Trang vừa được chọn: GIỮ VĨNH VIỄN trong hierarchy từ đây
