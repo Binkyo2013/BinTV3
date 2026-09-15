@@ -866,12 +866,131 @@ function suiteF() {
           /"uiState"/.test(webViewSrc));
 }
 
+function suiteG() {
+    console.log("\n=== SUITE G (build 241): mặc định mở PHIM + menu LONG-PRESS trong player ===");
+    const contentSrc = fs.readFileSync(path.join(REPO, "BinTV", "Views", "ContentView.swift"), "utf8");
+    const menuSrc = fs.readFileSync(path.join(REPO, "BinTV", "Views", "GestureOverlayMenuView.swift"), "utf8");
+    const webViewSrc = fs.readFileSync(SWIFT_WEBVIEW, "utf8");
+    const nativeSrc = fs.readFileSync(path.join(REPO, "BinTV", "Player", "PhimNativePlayerController.swift"), "utf8");
+    const tubeSrc = fs.readFileSync(path.join(REPO, "BinTV", "Views", "MovieListView.swift"), "utf8");
+    const liveSrc = fs.readFileSync(path.join(REPO, "BinTV", "Views", "PlayerView.swift"), "utf8");
+
+    // --- G1: module mặc định khi mở app = PHIM --------------------------
+    check("G", "Mở app → selectedTab mặc định = PHIM",
+          /@State private var selectedTab: Int = BinTVPage\.phim\.rawValue/.test(contentSrc));
+    check("G", "mountedTabs mặc định mount sẵn PHIM",
+          /mountedTabs: Set<Int> = \[BinTVPage\.phim\.rawValue\]/.test(contentSrc));
+    check("G", "tabHistory khởi đầu từ PHIM",
+          /tabHistory: \[Int\] = \[BinTVPage\.phim\.rawValue\]/.test(contentSrc));
+    check("G", "KHÔNG còn mặc định vào LIVE TV",
+          !/selectedTab: Int = BinTVPage\.liveTV\.rawValue/.test(contentSrc));
+
+    // --- G2: trung tâm menu + overlay -----------------------------------
+    check("G", "BinTVPlayerMenuCenter + BinTVPlayerMenuContext tồn tại",
+          /final class BinTVPlayerMenuCenter/.test(menuSrc)
+          && /struct BinTVPlayerMenuContext/.test(menuSrc));
+    check("G", "Menu có icon TẬP (list.bullet.rectangle) và BACK (chevron.backward)",
+          /list\.bullet\.rectangle/.test(menuSrc) && /chevron\.backward/.test(menuSrc));
+    check("G", "Nút TẬP chỉ thêm cho PHIM có nhiều tập",
+          /case \.phim\(let episodes\) = kind, episodes/.test(menuSrc));
+    check("G", "Menu được thêm vào KEY WINDOW (phủ được modal/fullscreen)",
+          /topWindow/.test(menuSrc));
+    check("G", "Long-press không có player → chạy fallback (BACK 1 lớp)",
+          /func handleLongPress\(fallback:/.test(menuSrc)
+          && /fallback\(\)/.test(menuSrc));
+    check("G", "Menu đang mở: giữ lần nữa bị bỏ qua (không back/chuyển trang chồng)",
+          /guard !isPresented else \{ return \}/.test(menuSrc));
+    check("G", "Chạm nút bị khoá sau 1 lần (không Back nhiều lớp)",
+          /func freezeUserInteraction/.test(menuSrc));
+
+    // --- G3: đăng ký ngữ cảnh của TỪNG trình phát -----------------------
+    check("G", "Player iOS PHIM đăng ký 'phim-native' (ưu tiên 100, TẬP theo episodeItems)",
+          /id: "phim-native"/.test(nativeSrc) && /priority: 100/.test(nativeSrc)
+          && /episodeItems\.count \?\? 0\) >= 2/.test(nativeSrc)
+          && /func requestEpisodePicker/.test(nativeSrc));
+    check("G", "Player web PHIM đăng ký 'phim-web' (ưu tiên 50)",
+          /id: "phim-web"/.test(webViewSrc) && /priority: 50/.test(webViewSrc)
+          && /webEpisodeCount \?\? 0\) >= 2/.test(webViewSrc));
+    check("G", "TẬP của player web click đúng nút 'Tập' của app.js",
+          /bintv-movie-player-episodes-btn/.test(webViewSrc));
+    check("G", "TUBE đăng ký 'tube' (ưu tiên 60) — menu KHÔNG có TẬP",
+          /id: "tube"/.test(tubeSrc) && /priority: 60/.test(tubeSrc)
+          && /kind: \{ \.other \}/.test(tubeSrc));
+    check("G", "BACK TUBE: fullscreen → thoát fullscreen trước (1 lớp)",
+          /func backOneLayer/.test(tubeSrc) && /jsExitFullscreen/.test(tubeSrc));
+    check("G", "LIVE TV đăng ký 'livetv' (ưu tiên 80) và gỡ khi đóng sheet",
+          /id: "livetv"/.test(liveSrc) && /priority: 80/.test(liveSrc)
+          && /unregister\(id: "livetv"\)/.test(liveSrc));
+    check("G", "BACK LIVE TV: FULL cover → inline; inline → lưới kênh (đúng 1 lớp)",
+          /FULL → inline/.test(liveSrc) && /inline → lưới kênh/.test(liveSrc));
+
+    // --- G4: MỌI recognizer long-press đi qua menu center ---------------
+    check("G", "ContentView: long-press cửa sổ đi qua menu center",
+          /handlePlayerAwareLongPress/.test(contentSrc)
+          && /installLongPressOnAllWindows/.test(contentSrc));
+    check("G", "Long-press được gắn trên MỌI UIWindow (kể cả fullscreen WebKit)",
+          /UIWindow\.didBecomeVisibleNotification/.test(contentSrc)
+          && /UIWindow\.didBecomeKeyNotification/.test(contentSrc));
+    check("G", "PHIM webview route long-press qua menu center",
+          /BinTVPlayerMenuCenter\.shared\.handleLongPress/.test(webViewSrc));
+    check("G", "TUBE webview route long-press qua menu center",
+          /BinTVPlayerMenuCenter\.shared\.handleLongPress/.test(tubeSrc));
+    check("G", "Player LIVE TV route long-press qua menu center",
+          /BinTVPlayerMenuCenter\.shared\.handleLongPress/.test(liveSrc));
+    check("G", "Chọn module từ menu: gỡ player phủ màn hình rồi đổi tab",
+          /handlePlayerMenuSelectTab/.test(contentSrc)
+          && /onLeaveToOtherTab/.test(contentSrc));
+    check("G", "Menu player đang phủ → gesture nền tạm nhường (không xuyên qua)",
+          /if BinTVPlayerMenuCenter\.shared\.isPresented \{ return false \}/.test(contentSrc));
+
+    // --- G5: runtime app.js — nút TẬP chỉ mở với phim bộ nhiều tập ------
+    const winS = makeWindow("http://127.0.0.1:3000/?android=phone&ios=landscape", true);
+    bootWebApp(winS, scriptList(false));
+    const hS = winS.__bintvMoviePlaybackHooks;
+    hS.setBrowserOpen(true);
+    hS.setEpisodes([
+        { id: "e1", title: "Tập 1" },
+        { id: "e2", title: "Tập 2" },
+        { id: "e3", title: "Tập 3" }
+    ], "series", "Phim Bộ", 0);
+    hS.startPlayback("https://cdn.vn/f/ep1.mp4", "Phim Bộ T1", { name: "1080p AAC" });
+    check("G", "PHIM BỘ 3 tập: hasEpisodeList = true", hS.hasEpisodeList() === true);
+    const btnS = winS.document.getElementById("bintv-movie-player-episodes-btn");
+    check("G", "PHIM BỘ: nút TẬP tồn tại trong player", !!btnS);
+    btnS.click();
+    check("G", "PHIM BỘ: click TẬP → mở danh sách tập trong player",
+          winS.document.getElementById("bintv-movie-player-episodes").classList.contains("show"));
+    const epPostsS = winS.__posted.filter(function (m) { return m.action === "episodes"; });
+    const epShow = epPostsS[epPostsS.length - 1];
+    check("G", "PHIM BỘ: mở TẬP → post episodes(show:true, đủ 3 mục) cho picker",
+          !!epShow && epShow.show === true && epShow.items.length === 3,
+          JSON.stringify(epShow));
+
+    const winL = makeWindow("http://127.0.0.1:3000/?android=phone&ios=landscape", true);
+    bootWebApp(winL, scriptList(false));
+    const hL = winL.__bintvMoviePlaybackHooks;
+    hL.setBrowserOpen(true);
+    hL.setEpisodes([{ id: "m1", title: "Phim Lẻ" }], "movie", "Phim Lẻ", -1);
+    hL.startPlayback("https://cdn.vn/f/movie.mp4", "Phim Lẻ", { name: "1080p AAC" });
+    check("G", "PHIM LẺ (1 tập): hasEpisodeList = false → menu không có TẬP",
+          hL.hasEpisodeList() === false);
+    const epPostsL = winL.__posted.filter(function (m) { return m.action === "episodes"; });
+    check("G", "PHIM LẺ: app.js post episodes items: [] (Swift ẩn nút TẬP)",
+          epPostsL.some(function (m) { return Array.isArray(m.items) && m.items.length === 0; }),
+          JSON.stringify(epPostsL));
+    const btnL = winL.document.getElementById("bintv-movie-player-episodes-btn");
+    if (btnL) btnL.click();
+    check("G", "PHIM LẺ: click TẬP KHÔNG mở được danh sách tập",
+          !winL.document.getElementById("bintv-movie-player-episodes").classList.contains("show"));
+}
+
 async function main() {
     suiteA();
     suiteB();
     suiteC();
     suiteE();
     suiteF();
+    suiteG();
     await suiteD();
     console.log("\n=========================================");
     console.log("PASS: " + pass + "   FAIL: " + fail);

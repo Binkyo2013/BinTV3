@@ -216,6 +216,7 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
     override init() {
         super.init()
         registerGestureContext()
+        registerPlayerMenuContext()
     }
 
     private func registerGestureContext() {
@@ -265,6 +266,58 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
             close: { [weak self] in
                 self?.closeByUserGesture()
             }))
+    }
+
+    // =================================================================
+    // [build 241] NGỮ CẢNH MENU LONG-PRESS TRONG PLAYER PHIM (native)
+    //
+    // Giữ màn hình khi AVPlayerViewController PHIM đang phủ toàn màn hình
+    // → menu 5 nút (LIVE TV/TUBE/SETTING/TẬP/BACK) với phim bộ nhiều tập,
+    // 4 nút (bỏ TẬP) với phim lẻ. TẬP dùng lại picker overlay sẵn có
+    // (danh sách tập do app.js đẩy qua action "episodes"); BACK đóng player
+    // đúng MỘT lớp (web app quay về chọn tập / lưới PHIM); chọn module khác
+    // cũng đi đường đóng player này rồi ContentView mới đổi trang.
+    // Ưu tiên 100: player native phủ trên MỌI thứ nên được chọn trước.
+    // =================================================================
+    private func registerPlayerMenuContext() {
+        BinTVPlayerMenuCenter.shared.register(BinTVPlayerMenuContext(
+            id: "phim-native",
+            priority: 100,
+            isActive: { [weak self] in self?.isPresented ?? false },
+            kind: { [weak self] in
+                .phim(episodes: (self?.episodeItems.count ?? 0) >= 2)
+            },
+            onBack: { [weak self] in
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                self?.backOneLayerInPlayer()
+            },
+            onOpenEpisodes: { [weak self] in
+                self?.requestEpisodePicker()
+            },
+            onLeaveToOtherTab: { [weak self] in
+                self?.closeByUserGesture()
+            }))
+    }
+
+    /// [build 241] Mở danh sách tập từ nút TẬP của menu long-press — chỉ
+    /// với phim bộ (≥2 tập); danh sách đã được app.js đẩy khi bắt đầu phát.
+    func requestEpisodePicker() {
+        guard isPresented, episodeItems.count >= 2 else { return }
+        PhimDebugLog.step("MENU", "nativeEpisodes", "go",
+                          "count=\(episodeItems.count) current=\(currentEpisodeIndex)")
+        showEpisodePicker()
+    }
+
+    /// [build 241] BACK đúng MỘT lớp trong player iOS: đang mở panel danh
+    /// sách tập → chỉ đóng panel; player đang phát → đóng player (web app
+    /// quay về chọn tập / lưới PHIM).
+    private func backOneLayerInPlayer() {
+        if episodePickerView != nil {
+            PhimDebugLog.step("MENU", "nativeBack", "go", "đóng panel danh sách tập")
+            hideEpisodePicker()
+            return
+        }
+        closeByUserGesture()
     }
 
     /// [build 234] RETURN bằng gesture: người dùng vuốt từ TRÊN xuống trong

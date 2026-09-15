@@ -102,11 +102,16 @@ struct MovieListView: View {
             }
         }
         .onAppear {
+            // [build 241] Báo tab TUBE đang hiển thị để menu long-press xét
+            // đúng ngữ cảnh player của tab hiện tại.
+            browser.setTabActive(isActive)
             // Audio session để âm thanh tiếp tục khi app ẩn / khóa màn hình
             // (kết hợp UIBackgroundModes: audio đã có sẵn trong Info.plist).
             browser.configureAudioSession()
         }
         .onChange(of: isActive) { active in
+            // [build 241] Cập nhật trạng thái tab cho ngữ cảnh menu player.
+            browser.setTabActive(active)
             // MỖI LẦN QUAY LẠI TAB TUBE: xác nhận audio session + repaint
             // layer (khôi phục nếu webview trống). KHÔNG reload khi trạng
             // thái hiện tại vẫn dùng được.
@@ -152,6 +157,16 @@ final class YouTubeBrowser: NSObject, ObservableObject, WKNavigationDelegate, WK
     /// Video hiện tại là video NGANG (16:9, 4:3...) — quyết định việc hiện
     /// nút fullscreen landscape. Video dọc/Short → false → không hiện nút.
     @Published var isLandscapeVideo = false
+    /// [build 241] Tab TUBE có đang được chọn không (menu long-press chỉ xét
+    /// player của tab đang hiển thị — tương tự tabIsActive bên PHIM).
+    private(set) var tabIsActive = false
+    /// [build 241] Video có đang ở fullscreen native WebKit (window riêng)
+    /// không — BACK trong menu player phải THOÁT fullscreen (1 lớp) trước.
+    private(set) var isVideoFullscreen = false
+
+    func setTabActive(_ active: Bool) {
+        tabIsActive = active
+    }
 
     private var hookRetry: DispatchWorkItem?
     private var fullscreenRetry: DispatchWorkItem?
@@ -420,8 +435,75 @@ final class YouTubeBrowser: NSObject, ObservableObject, WKNavigationDelegate, WK
         backGesture.cancelsTouchesInView = false
         backGesture.delaysTouchesBegan = false
         webView.addGestureRecognizer(backGesture)
+        registerPlayerMenuContext()
         webView.load(URLRequest(url: URL(string: "https://www.youtube.com")!))
     }
+
+    // =================================================================
+    // [build 241] NGỮ CẢNH MENU LONG-PRESS CHO PLAYER TUBE
+    //
+    // Giữ màn hình khi đang ở trang video thường (KHÔNG gồm SHORT FEED —
+    // feed vuốt dọc giữ nguyên hành vi BACK cũ) → menu 4 nút
+    // LIVE TV/TUBE/SETTING/BACK (KHÔNG có TẬP — TUBE không có danh sách
+    // tập phim). BACK: đang fullscreen native → thoát fullscreen (1 lớp);
+    // không thì goBack() 1 bước lịch sử webview.
+    // =================================================================
+    private func registerPlayerMenuContext() {
+        BinTVPlayerMenuCenter.shared.register(BinTVPlayerMenuContext(
+            id: "tube",
+            priority: 60,
+            isActive: { [weak self] in
+                guard let self = self, self.tabIsActive else { return false }
+                return self.isOnVideoPage && !self.isShortsPage
+            },
+            kind: { .other },
+            onBack: { [weak self] in
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                self?.backOneLayer()
+            },
+            onOpenEpisodes: nil,
+            // Chuyển hẳn sang module khác: chỉ cần THOÁT fullscreen (nếu có)
+            // để cửa sổ video không phủ tab mới; trang watch inline ẩn theo
+            // lớp trang như mọi lần chuyển tab.
+            onLeaveToOtherTab: { [weak self] in
+                self?.exitFullscreenIfNeeded()
+            }))
+    }
+
+    /// [build 241] BACK đúng 1 lớp trong TUBE: fullscreen → thoát fullscreen;
+    /// trang thường → lùi lịch sử webview 1 bước; Short feed không vào nhánh
+    /// này (context không active).
+    private func backOneLayer() {
+        if isVideoFullscreen {
+            exitFullscreenIfNeeded()
+        } else if webView.canGoBack {
+            webView.goBack()
+        }
+    }
+
+    private func exitFullscreenIfNeeded() {
+        guard isVideoFullscreen else { return }
+        webView.evaluateJavaScript(Self.jsExitFullscreen) { _, _ in }
+    }
+
+    /// Thoát fullscreen native WebKit (DOM Fullscreen API lẫn API riêng của
+    /// phần tử <video>) — tương đương nút X/kéo xuống của hệ thống.
+    private static let jsExitFullscreen = """
+    (function () {
+        try {
+            if (document.fullscreenElement && document.exitFullscreen) {
+                document.exitFullscreen();
+            }
+            if (document.webkitFullscreenElement && document.webkitExitFullscreen) {
+                document.webkitExitFullscreen();
+            }
+            var v = document.querySelector('video');
+            if (v && typeof v.webkitExitFullscreen === 'function') {
+                try { v.webkitExitFullscreen(); } catch (e) {}
+            }
+        } catch (e) {}
+    })();
+    """
 
     deinit {
         hookRetry?.cancel()
@@ -431,15 +513,17 @@ final class YouTubeBrowser: NSObject, ObservableObject, WKNavigationDelegate, WK
 
     // MARK: - Theater mode (toàn màn hình)
 
-    /// [build 235] Long-press trên webview → BACK 1 bước.
-    /// (state .began của UILongPressGestureRecognizer = đã giữ đủ 0.4s.)
-    /// Trước build 235 long-press = hiện menu tab; nay menu chỉ mở bằng
-    /// vuốt cạnh phải, long-press = nút Back kiểu Android TV (ContentView
-    /// xử lý: webview goBack → lùi tab → NO-OP ở màn gốc, không thoát app).
+    /// [build 241] Long-press trên webview:
+    /// - đang ở trang video thường (kể cả fullscreen) → MENU PLAYER 4 nút
+    ///   (LIVE TV/TUBE/SETTING/BACK), KHÔNG tự back/đóng video;
+    /// - ngoài player (feed/SHORT/tìm kiếm) → BACK 1 bước (build 235) qua
+    ///   closure của ContentView (webview goBack → lùi tab → NO-OP ở gốc).
     @objc private func handleBackLongPress(_ gesture: UILongPressGestureRecognizer) {
         guard gesture.state == .began else { return }
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        onLongPress?()
+        BinTVPlayerMenuCenter.shared.handleLongPress { [weak self] in
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            self?.onLongPress?()
+        }
     }
 
     /// Video thực sự bắt đầu phát (1 lần mỗi trang) → theater mode +
@@ -500,6 +584,9 @@ final class YouTubeBrowser: NSObject, ObservableObject, WKNavigationDelegate, WK
     /// - FS TẮT (sau khi đã xoay) → xoay về portrait, khôi phục layout.
     /// - Video DỌC + FS bật → giữ portrait (không ép landscape).
     private func handleVideoFullscreenChange(_ active: Bool) {
+        // [build 241] Mirror trạng thái fullscreen cho menu long-press
+        // (BACK/đổi module phải thoát fullscreen trước).
+        isVideoFullscreen = active
         if active {
             if isLandscapeVideo, !isLandscapeSessionActive {
                 isLandscapeSessionActive = true
@@ -688,6 +775,8 @@ extension YouTubeBrowser {
         isShortsPage = isShorts
         isLandscapeVideo = false
         isOnVideoPage = isWatch
+        // [build 241] Trang mới chưa thể đang fullscreen.
+        isVideoFullscreen = false
         theaterArmed = true
         if isWatch {
             applyVideoHooks()

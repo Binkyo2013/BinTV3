@@ -624,3 +624,38 @@ node run.js` → **91/91 PASS** (72 cũ + 19 mới — SUITE C: cầu nối `__b
 nén cue `{s,e,t}`, khớp `session`, tắt phụ đề → `cues=[]`, không đẩy khi chưa handoff/đã
 đóng, hành vi khi không có cầu nối, và wiring Swift `action == "subtitles"` /
 `updateSubtitles` / `contentOverlayView`). Swift compile/link vẫn do GitHub Actions xác nhận.
+
+### Build 241 (2.5.7) — Mở app vào thẳng PHIM · menu LONG-PRESS trong video player
+
+**1. Module mặc định khi khởi động = PHIM** (trước đây là LIVE TV):
+`selectedTab` / `mountedTabs` / `tabHistory` trong `ContentView` đều khởi tạo từ
+`BinTVPage.phim`; các tab còn lại vẫn mount lazy và giữ nguyên trạng thái như cũ.
+
+**2. Giữ màn hình (long-press ≥0.35s) KHI ĐANG PHÁT VIDEO → MENU NGỮ CẢNH**, KHÔNG
+còn tự động back/thoát về danh sách phim:
+- Module **PHIM, phim bộ nhiều tập**: 5 nút **LIVE TV · TUBE · SETTING · TẬP · BACK**.
+- Module **PHIM, phim lẻ 1 tập** và mọi player khác (**LIVE TV, TUBE**): 4 nút
+  **LIVE TV · TUBE · SETTING · BACK** (không có TẬP).
+- **TẬP**: player iOS mở lại panel danh sách tập sẵn có (`requestEpisodePicker`);
+  player web kích hoạt đúng nút "Tập" của app.js
+  (`#bintv-movie-player-episodes-btn`) → chọn tập của đúng phim đang phát.
+- **BACK**: lùi ĐÚNG MỘT lớp (panel tập → player; player native PHIM → chọn tập/
+  lưới; player web → `__bintvPhimReturn`; LIVE TV mức FULL pinch → player inline →
+  lưới kênh; TUBE fullscreen → trang watch → goBack 1 bước). Không thoát app,
+  không về Home, không back nhiều lớp.
+- LIVE TV/TUBE/SETTING trong menu: gỡ lớp player phủ toàn màn hình (sheet/modal/
+  fullscreen WebKit) rồi chuyển trang; player inline ẩn theo lớp trang.
+
+**3. Kỹ thuật:** `BinTVPlayerMenuCenter` (singleton) + overlay UIKit vẽ thẳng lên
+KEY WINDOW (phủ được AVPlayerViewController modal, sheet LIVE TV và WINDOW
+RIÊNG của video fullscreen WebKit/TUBE — long-press được gắn trên MỌI `UIWindow`
+qua `didBecomeVisible/didBecomeKey`). Bốn trình phát đăng ký ngữ cảnh theo ưu
+tiên: phim-native (100) > livetv (80) > tube (60) > phim-web (50). Long-press
+ngoài player giữ NGUYÊN hành vi BACK 1 lớp (build 235); các gesture vuốt cạnh
+(vuốt ngang tua, cạnh trái back, cạnh phải menu 4 tab, trên-xuống đóng player),
+LIVE TV/TUBE/SETTING và nguồn `.json` của PHIM không thay đổi.
+
+**Kiểm chứng:** `cd tests/ios-native-handoff && npm test` → **202/202 PASS**
+(170 cũ + SUITE G mới: mặc định PHIM, menu 4/5 nút theo ngữ cảnh, TẬP chỉ cho
+phim bộ, BACK một lớp, mọi recognizer đi qua menu center; runtime app.js khẳng
+định nút TẬP mở danh sách cho phim bộ 3 tập và bị bỏ qua với phim lẻ).

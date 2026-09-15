@@ -105,6 +105,10 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     private var webUiCanReturn = false
     /// Trình phát TÍCH HỢP (thẻ <video> trong web app) đang mở?
     private var webPlayerOpen = false
+    /// [build 241] Số tập của phim ĐANG phát (mirror từ action "episodes"
+    /// của app.js) — ≥2 thì menu long-press trong player web mới có nút TẬP;
+    /// phim lẻ / ngoài player = 0.
+    private var webEpisodeCount = 0
     /// Vị trí (giây) + thời lượng (giây) của trình phát tích hợp — mirror từ
     /// web app, là GỐC để tính đích tua tuyệt đối khi người dùng vuốt ngang.
     private var webPlayerPosition: Double = 0
@@ -129,6 +133,7 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         configure(webView, configuration: configuration)
         configureNativePlayerCallbacks()
         registerGestureContext()
+        registerPlayerMenuContext()
         installLifecycleObservers()
         registerBackHandler()
         PhimDebugLog.step("WEBVIEW", "controllerInit", "ok",
@@ -256,6 +261,57 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         PhimDebugLog.step("GESTURE", "registerContext", "ok", "player=phim-web-player")
     }
 
+    // =================================================================
+    // [build 241] NGỮ CẢNH MENU LONG-PRESS CHO TRÌNH PHÁT TÍCH HỢP (web)
+    //
+    // Giữ màn hình khi <video> của web app đang phát (tab PHIM đang hiện):
+    //   • phim bộ ≥2 tập → menu 5 nút (TẬP mở đúng danh sách tập của phim);
+    //   • phim lẻ 1 tập → menu 4 nút (không TẬP).
+    // BACK = Return của chính web app (player → chọn tập → chi tiết → lưới,
+    // đúng MỘT lớp mỗi lần). KHÔNG đóng/back khi mới giữ: menu hiển thị thay
+    // cho việc thoát về danh sách phim.
+    // =================================================================
+    private func registerPlayerMenuContext() {
+        BinTVPlayerMenuCenter.shared.register(BinTVPlayerMenuContext(
+            id: "phim-web",
+            priority: 50,
+            isActive: { [weak self] in
+                guard let self = self else { return false }
+                return self.tabIsActive && self.webPlayerOpen
+            },
+            kind: { [weak self] in
+                .phim(episodes: (self?.webEpisodeCount ?? 0) >= 2)
+            },
+            onBack: { [weak self] in
+                self?.performWebReturn(reason: "player-menu-back")
+            },
+            onOpenEpisodes: { [weak self] in
+                self?.openWebEpisodeList()
+            },
+            // Player inline nằm TRONG trang PHIM: chuyển tab chỉ ẩn lớp trang
+            // (giữ trạng thái như các lần chuyển tab khác) → không cần gỡ.
+            onLeaveToOtherTab: nil))
+    }
+
+    /// [build 241] Nút TẬP: mở danh sách tập NGAY TRONG player web bằng
+    /// chính nút "Tập" của app.js (`openMoviePlayerEpisodeMenu` — chỉ mở khi
+    /// phim có nhiều tập; nếu đang chạy player native thì hành động tương tự
+    /// cũng đồng bộ picker sang native).
+    private func openWebEpisodeList() {
+        PhimDebugLog.step("MENU", "webEpisodes", "go", "count=\(webEpisodeCount)")
+        evaluateJS(Self.jsOpenEpisodeList)
+    }
+
+    private static let jsOpenEpisodeList = """
+    (function () {
+        try {
+            var b = document.getElementById('bintv-movie-player-episodes-btn');
+            if (b) { b.click(); return true; }
+            return false;
+        } catch (e) { return false; }
+    })();
+    """
+
     /// Chạy JS trên webview hiện tại (bỏ qua kết quả) — an toàn cả khi
     /// webview đang được thay thế/đang nạp lại.
     private func evaluateJS(_ js: String) {
@@ -309,13 +365,16 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         }
     }
 
-    /// [build 235] Long-press đủ 0.35s → BACK 1 bước (trước đây là hiện menu
-    /// tab). ContentView xử lý chuỗi Back của PHIM: trình phát → chọn tập →
-    /// chi tiết → lưới PHIM; màn gốc → NO-OP (không thoát app, không về Home).
+    /// [build 241] Long-press đủ 0.35s:
+    /// - ĐANG phát phim (web) → MENU NGỮ CẢNH (LIVE TV/TUBE/SETTING/TẬP/BACK
+    ///   hoặc bỏ TẬP với phim lẻ) — KHÔNG tự thoát về danh sách phim;
+    /// - ngoài player → BACK 1 bước (build 235) qua closure của ContentView.
     @objc private func handleBackLongPress(_ gesture: UILongPressGestureRecognizer) {
         guard gesture.state == .began else { return }
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        onLongPress?()
+        BinTVPlayerMenuCenter.shared.handleLongPress { [weak self] in
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            self?.onLongPress?()
+        }
     }
 
     /// Khơi server nội bộ + tải web app.
@@ -1234,7 +1293,11 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
             }
             let current = (dict["current"] as? NSNumber)?.intValue ?? -1
             let show = Self.boolValue(dict["show"]) ?? false
+            // [build 241] Ghi nhận số tập cho MENU LONG-PRESS của trình phát
+            // web (app.js gửi items: [] cho phim lẻ → tự ẩn nút TẬP).
+            let episodeCount = items.count
             let apply: () -> Void = { [weak self] in
+                self?.webEpisodeCount = episodeCount
                 self?.nativePlayer.updateEpisodes(items, current: current, showPicker: show)
             }
             if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
@@ -1386,6 +1449,8 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
             //     gesture ngang (gốc tính đích tua tuyệt đối).
             webUiCanReturn = (body["canReturn"] as? Bool) ?? false
             webPlayerOpen = (body["playerOpen"] as? Bool) ?? false
+            // [build 241] Player đã đóng → không còn ngữ cảnh TẬP cho menu.
+            if !webPlayerOpen { webEpisodeCount = 0 }
             let positionMs = (body["positionMs"] as? NSNumber)?.doubleValue ?? 0
             let durationMs = (body["durationMs"] as? NSNumber)?.doubleValue ?? 0
             webPlayerPosition = positionMs > 0 ? positionMs / 1000 : 0

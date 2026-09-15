@@ -97,11 +97,18 @@ import WebKit
 //   3. Recongnizer `.top` CHỈ nhận touch khi có trình phát đang mở → LIVE TV,
 //      TUBE, SETTING hoàn toàn không bị ảnh hưởng.
 //
-// F. [build 235 — 2026-09-15] GIỮ MÀN HÌNH = BACK TỪNG LỚP (không còn menu)
+// F. [build 235] GIỮ MÀN HÌNH = BACK TỪNG LỚP (ngoài player)
+//    [build 241 — 2026-09-15] GIỮ MÀN HÌNH KHI ĐANG PHÁT VIDEO = MENU PLAYER
 // ---------------------------------------------------------------------------
-// Yêu cầu: long-press MẤT hành vi "hiện Menu", thay bằng Back đúng 1 lớp
-// (giống nút Back Android TV), đến màn gốc của module thì dừng (NO-OP —
-// KHÔNG thoát app, KHÔNG về Home iPhone, KHÔNG đóng BinTV).
+// [build 235] NGOÀI video player: long-press = Back đúng 1 lớp (giống nút
+// Back Android TV), đến màn gốc của module thì dừng (NO-OP — KHÔNG thoát
+// app, KHÔNG về Home iPhone, KHÔNG đóng BinTV).
+// [build 241] KHI video player đang mở: long-press KHÔNG back/thoát, hiện
+// menu ngữ cảnh (BinTVPlayerMenuCenter):
+//   • PHIM phim bộ: LIVE TV · TUBE · SETTING · TẬP · BACK;
+//   • PHIM phim lẻ / LIVE TV / TUBE: LIVE TV · TUBE · SETTING · BACK.
+// TẬP mở danh sách tập của phim đang phát; BACK lùi đúng 1 lớp. Long-press
+// đã được gắn trên MỌI UIWindow (kể cả window fullscreen video của WebKit).
 // Cách làm: long-press gọi CÙNG `handleBackGesture()` với vuốt cạnh trái
 // → hai gesture hành xử HỒI QUY (idempotent, mỗi lần tối đa 1 bước):
 //   menu đang mở        → ẩn menu;
@@ -132,7 +139,9 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     /// Trang đang hiển thị (0…3 — semantics BinTVPage, không đổi).
-    @State private var selectedTab: Int = BinTVPage.liveTV.rawValue
+    /// [build 241] MẶC ĐỊNH MỞ APP → VÀO THẲNG MODULE PHIM (trước đây là
+    /// LIVE TV).
+    @State private var selectedTab: Int = BinTVPage.phim.rawValue
     /// Overlay menu (LIVE TV/TUBE/PHIM/SETTING) — MẶC ĐỊNH ẨN KHI MỞ APP.
     @State private var showMenu = false
 
@@ -142,11 +151,12 @@ struct ContentView: View {
     /// Trang đã từng mở: MỘT KHI ĐÃ MOUNT THÌ KHÔNG BAO GIỜ GỠ RA
     /// (mục B.2) → webview PHIM/TUBE luôn ở trong window, giữ nguyên
     /// trạng thái đang xem (không reload, không màn hình đen).
-    @State private var mountedTabs: Set<Int> = [BinTVPage.liveTV.rawValue]
+    /// [build 241] Trang mount sẵn khi mở app = PHIM (module mặc định).
+    @State private var mountedTabs: Set<Int> = [BinTVPage.phim.rawValue]
 
     /// Lịch sử chuyển trang — Back bằng vuốt cạnh trái dùng để lùi đúng
     /// 1 bước khi trang hiện tại không còn mức nào để lùi (mục 5).
-    @State private var tabHistory: [Int] = [BinTVPage.liveTV.rawValue]
+    @State private var tabHistory: [Int] = [BinTVPage.phim.rawValue]
 
     var body: some View {
         GeometryReader { geo in
@@ -186,17 +196,20 @@ struct ContentView: View {
             }
         }
         // ----- GESTURE TOÀN APP, GẮN TRÊN UIWINDOW (mục B.3 + F) -----
-        // [build 235] GIỮ MÀN HÌNH = BACK 1 BƯỚC (không còn mở menu):
-        // • giữ ≥0.35s            → handleBackGesture()  (Back 1 bước)
-        // • vuốt cạnh PHẢI vào    → toggleOverlayMenu()  (mở menu — cách duy nhất)
+        // [build 241] GIỮ MÀN HÌNH:
+        // • đang phát video → MENU NGỮ CẢNH PLAYER (LIVE TV/TUBE/SETTING/
+        //   BACK; PHIM phim bộ thêm TẬP) — KHÔNG tự thoát khỏi player;
+        // • ngoài player    → handleBackGesture()  (Back 1 bước, build 235)
+        // • vuốt cạnh PHẢI vào    → toggleOverlayMenu()  (menu 4 tab)
         // • vuốt cạnh TRÁI sang   → handleBackGesture()  (Back 1 bước)
-        // [build 235] Long-press nhận ở MỌI trạng thái app (menu đang mở =
-        // back ra khỏi menu; player sheet/native player đang phủ = back ra
-        // khỏi player) — vì hành vi là BACK. Delegate chỉ nhường WKWebView
-        // (có recognizer riêng) + UIControl/ô nhập liệu (long-press hệ thống)
-        // → không cướp/cản trở thao tác nội dung.
+        // Long-press được gắn trên MỌI window (kể cả window fullscreen video
+        // WebKit của TUBE); delegate nhường WKWebView ở window chính (có
+        // recognizer riêng) + UIControl/ô nhập liệu (long-press hệ thống).
         .background(
-            BinTVWindowGestures(onLongPress: { handleBackGesture() },
+            // [build 241] GIỮ MÀN HÌNH = MENU NGỮ CẢNH KHI ĐANG PHÁT VIDEO
+            // (LIVE TV/TUBE: LIVE TV·TUBE·SETTING·BACK; PHIM phim bộ: thêm
+            // TẬP); ngoài player vẫn là BACK 1 bước (build 235).
+            BinTVWindowGestures(onLongPress: { handlePlayerAwareLongPress() },
                                 onEdgeRight: { toggleOverlayMenu() },
                                 onEdgeLeft: { handleBackGesture() })
                 .frame(width: 0, height: 0)
@@ -204,6 +217,11 @@ struct ContentView: View {
         .onAppear {
             Task { await streamService.loadChannels() }
             BinTVLifecycleCenter.shared.scenePhaseDidChange(scenePhase)
+            // Chọn LIVE TV/TUBE/SETTING từ MENU TRONG PLAYER: ContentView là
+            // nơi duy nhất gỡ được lớp player phủ màn hình rồi đổi trang.
+            BinTVPlayerMenuCenter.shared.onSelectTab = { tab in
+                handlePlayerMenuSelectTab(tab)
+            }
         }
         .onChange(of: scenePhase) { phase in
             BinTVLifecycleCenter.shared.scenePhaseDidChange(phase)
@@ -245,18 +263,19 @@ struct ContentView: View {
 
     private var tubePage: some View {
         pageLayer(.tube) {
-            // [build 235] Long-press trên webview TUBE = BACK 1 bước
-            // (trước đây là hiện menu tab).
-            MovieListView(onLongPress: { handleBackGesture() },
+            // [build 241] Long-press trên webview TUBE: đang ở trang video
+            // (kể cả fullscreen) → MENU PLAYER (LIVE TV/TUBE/SETTING/BACK);
+            // ngoài player → BACK 1 bước (build 235).
+            MovieListView(onLongPress: { handlePlayerAwareLongPress() },
                           isActive: selectedTab == BinTVPage.tube.rawValue)
         }
     }
 
     private var phimPage: some View {
         pageLayer(.phim) {
-            // [build 235] Long-press trên webview PHIM = BACK 1 bước
-            // (trước đây là hiện menu tab).
-            PhimView(onLongPress: { handleBackGesture() },
+            // [build 241] Long-press trên webview PHIM: đang phát phim →
+            // MENU PLAYER (thêm TẬP với phim bộ); ngoài player → BACK 1 bước.
+            PhimView(onLongPress: { handlePlayerAwareLongPress() },
                      isActive: selectedTab == BinTVPage.phim.rawValue)
         }
     }
@@ -302,6 +321,38 @@ struct ContentView: View {
         guard !showingPlayer else { return }
         showMenu = true
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    // =================================================================
+    // [build 241] LONG-PRESS THEO NGỮ CẢNH PLAYER
+    //
+    // Mọi recognizer long-press (cửa sổ, webview PHIM/TUBE, view của
+    // AVPlayerViewController LIVE TV/PHIM-native) đều gọi DUY NHẤT đường
+    // này:
+    //   • có video player đang mở (bất kỳ module nào) → BinTVPlayerMenuCenter
+    //     hiện MENU NGỮ CẢNH, KHÔNG tự back/đóng/thoát về danh sách;
+    //   • không có player nào mở → giữ nguyên hành vi build 235: BACK 1 lớp.
+    // =================================================================
+    private func handlePlayerAwareLongPress() {
+        BinTVPlayerMenuCenter.shared.handleLongPress { [self] in
+            handleBackGesture()
+        }
+    }
+
+    /// Chọn LIVE TV / TUBE / SETTING từ MENU TRONG PLAYER:
+    /// - Chọn đúng module hiện tại = BACK đúng 1 lớp (vd. TUBE fullscreen →
+    ///   thoát fullscreen, ở lại TUBE).
+    /// - Chọn module khác: gỡ các lớp player PHỦ TOÀN MÀN HÌNH (sheet LIVE
+    ///   TV, AVPlayerViewController PHIM, fullscreen TUBE) trước rồi mới đổi
+    ///   trang; player inline nằm trong trang sẽ tự ẩn theo lớp trang.
+    private func handlePlayerMenuSelectTab(_ tab: Int) {
+        if tab == selectedTab {
+            BinTVPlayerMenuCenter.shared.activeContext?.onBack()
+            return
+        }
+        BinTVPlayerMenuCenter.shared.activeContext?.onLeaveToOtherTab?()
+        if showingPlayer { showingPlayer = false }
+        selectTab(tab)
     }
 
     // =================================================================
@@ -591,13 +642,29 @@ private struct BinTVWindowGestures: UIViewControllerRepresentable {
                 selector: #selector(appDidBecomeActive),
                 name: UIApplication.didBecomeActiveNotification,
                 object: nil)
+            // [build 241] Video fullscreen của WebKit (TUBE tự lên fullscreen)
+            // chạy ở WINDOW RIÊNG do hệ thống tạo sau → gắn long-press lên
+            // MỌI window mới xuất hiện để MENU PLAYER hoạt động cả ở đó.
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleWindowsChanged),
+                name: UIWindow.didBecomeVisibleNotification,
+                object: nil)
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleWindowsChanged),
+                name: UIWindow.didBecomeKeyNotification,
+                object: nil)
         }
 
         deinit {
             NotificationCenter.default.removeObserver(self)
         }
 
-        /// Gắn 3 recognizer lên window — IDEMPOTENT (mỗi loại đúng 1 lần).
+        /// Gắn recognizer lên window — IDEMPOTENT (mỗi loại đúng 1 lần).
+        /// Long-press được gắn trên MỌI window (kể cả window fullscreen video
+        /// của WebKit — [build 241] MENU PLAYER); 3 recognizer vuốt cạnh chỉ
+        /// gắn trên window CHÍNH (gesture điều hướng/ tua theo ngữ cảnh tab).
         func install() {
             guard let window = resolveWindow() else {
                 // Window chưa sẵn sàng lúc mới render (scene chưa active)
@@ -619,6 +686,33 @@ private struct BinTVWindowGestures: UIViewControllerRepresentable {
             // [build 234] Vuốt từ TRÊN xuống: chỉ nhận touch khi ĐANG ở trong
             // trình phát (xem shouldReceive) → không ảnh hưởng tab khác.
             installEdgeSwipe(.top, on: window)
+
+            installLongPressOnAllWindows()
+        }
+
+        /// [build 241] Gắn long-press lên mọi window đang tồn tại (window
+        /// fullscreen video WebKit do hệ thống sinh ra ở key window riêng —
+        /// không gắn ở đây thì giữ màn hình khi xem TUBE fullscreen không gọi
+        /// được menu). Recognizer vuốt cạnh KHÔNG gắn lên các window phụ.
+        @objc private func handleWindowsChanged() {
+            installLongPressOnAllWindows()
+        }
+
+        private func installLongPressOnAllWindows() {
+            guard installedWindow != nil else { return }
+            let windows = UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .flatMap { $0.windows }
+            for window in windows {
+                let already = window.gestureRecognizers?.contains {
+                    $0 is BinTVBackLongPressRecognizer
+                } ?? false
+                guard !already else { continue }
+                let press = BinTVBackLongPressRecognizer(
+                    target: self, action: #selector(handleLongPress(_:)))
+                press.delegate = self
+                window.addGestureRecognizer(press)
+            }
         }
 
         private func installEdgeSwipe(_ edge: BinTVEdgeSwipeRecognizer.Edge,
@@ -848,14 +942,21 @@ private struct BinTVWindowGestures: UIViewControllerRepresentable {
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                                shouldReceive touch: UITouch) -> Bool {
+            // [build 241] MENU PLAYER đang phủ: chỉ UI menu nhận touch — mọi
+            // gesture nền (long-press lẫn vuốt tua/back) tạm nhường để không
+            // có lệnh nào xuyên qua menu.
+            if BinTVPlayerMenuCenter.shared.isPresented { return false }
             if gestureRecognizer is BinTVBackLongPressRecognizer {
-                // [build 235] Long-press = BACK 1 bước → nhận ở MỌI trạng
-                // thái của app (menu đang mở = back ra khỏi menu; player
-                // sheet/native player đang phủ = back ra khỏi player).
+                // [build 241] Long-press khi ĐANG phát video = MENU NGỮ CẢNH
+                // (xem BinTVPlayerMenuCenter); ngoài player = BACK 1 bước.
                 // CHỈ nhường các vùng có gesture riêng:
-                // • WKWebView: webview đã có recognizer long-press riêng.
+                // • WKWebView ở WINDOW CHÍNH: webview đã có recognizer riêng
+                //   (window fullscreen video WebKit KHÔNG chứa webview gốc →
+                //   vẫn nhận để menu hoạt động khi xem TUBE fullscreen).
                 // • UIControl / TextField (chọn-paste của hệ thống).
-                if Self.enclosingWebView(touch.view) != nil { return false }
+                let hostWindow = gestureRecognizer.view as? UIWindow
+                let isPrimaryWindow = hostWindow.map { $0 === installedWindow } ?? false
+                if isPrimaryWindow, Self.enclosingWebView(touch.view) != nil { return false }
                 if Self.isControlOrTextInput(touch.view) { return false }
                 return true
             }
