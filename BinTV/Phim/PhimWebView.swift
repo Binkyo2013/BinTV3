@@ -82,8 +82,10 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     // =================================================================
     private let nativePlayer = PhimNativePlayerController()
 
-    /// Long-press trên webview (≥0.35s) → hiển thị menu tab
-    /// (LIVE TV/TUBE/PHIM/SETTINGS) — nhất quán 4 tab. Gắn bởi PhimView.
+    /// [build 235] Long-press trên webview (≥0.35s) → BACK 1 bước
+    /// (`handleBackGesture` của ContentView — trước đây là hiện menu tab).
+    /// Chuỗi Back của PHIM: trình phát → chọn tập → chi tiết → lưới PHIM;
+    /// ở màn gốc → NO-OP (KHÔNG thoát app). Gắn bởi PhimView.
     var onLongPress: (() -> Void)?
 
     // =================================================================
@@ -197,13 +199,14 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         view.navigationDelegate = self
         view.uiDelegate = self
 
-        let menuGesture = UILongPressGestureRecognizer(
-            target: self, action: #selector(handleMenuLongPress(_:))
+        // [build 235] Long-press (≥0.35s) = BACK 1 bước (trước đây = hiện menu tab).
+        let backGesture = UILongPressGestureRecognizer(
+            target: self, action: #selector(handleBackLongPress(_:))
         )
-        menuGesture.minimumPressDuration = 0.35
-        menuGesture.cancelsTouchesInView = false
-        menuGesture.delaysTouchesBegan = false
-        view.addGestureRecognizer(menuGesture)
+        backGesture.minimumPressDuration = 0.35
+        backGesture.cancelsTouchesInView = false
+        backGesture.delaysTouchesBegan = false
+        view.addGestureRecognizer(backGesture)
     }
 
     private func detach(_ view: WKWebView) {
@@ -306,8 +309,10 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         }
     }
 
-    /// Long-press đủ 0.35s → hiện menu tab (LIVE TV/TUBE/PHIM/SETTINGS).
-    @objc private func handleMenuLongPress(_ gesture: UILongPressGestureRecognizer) {
+    /// [build 235] Long-press đủ 0.35s → BACK 1 bước (trước đây là hiện menu
+    /// tab). ContentView xử lý chuỗi Back của PHIM: trình phát → chọn tập →
+    /// chi tiết → lưới PHIM; màn gốc → NO-OP (không thoát app, không về Home).
+    @objc private func handleBackLongPress(_ gesture: UILongPressGestureRecognizer) {
         guard gesture.state == .began else { return }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         onLongPress?()
@@ -2259,7 +2264,8 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
 
 struct PhimView: View {
     @StateObject private var controller = PhimController()
-    /// Long-press → hiện menu tab (gắn bởi ContentView, nhất quán 4 tab).
+    /// [build 235] Long-press → BACK 1 bước (gắn bởi ContentView — trước đây
+    /// là hiện menu tab).
     var onLongPress: () -> Void = {}
     /// [2026-09-12, build 221] Tab PHIM có đang được chọn hay không —
     /// ContentView truyền vào. Trang PHIM GIỮ NGUYÊN trong hierarchy khi

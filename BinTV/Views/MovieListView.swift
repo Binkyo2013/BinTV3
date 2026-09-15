@@ -6,11 +6,14 @@ import UIKit
 /// Tab MOVIE: YouTube trong WKWebView — giao diện app video mobile:
 /// - KHÔNG header/tiêu đề app (ContentView ẩn nav bar ở tab này), không nút
 ///   trình duyệt, không URL bar.
-/// - **Giữ màn hình (~0.35s) = HIỆN MENU TAB** (LIVE TV/TUBE/PHIM/SETTINGS)
-///   — hành vi nhất quán 4 tab (ContentView sở hữu state ẩn/hiện + tự ẩn
-///   sau ~4s). Long-press dùng UILongPressGestureRecognizer đặt TRÊN webview
-///   với `cancelsTouchesInView = false` → tap / swipe / pinch / video
-///   controls HOÀN TOÀN không bị ảnh hưởng.
+/// - **Giữ màn hình (~0.4s) = BACK 1 BƯỚC** ([build 235] — trước đây là
+///   HIỆN MENU TAB). Long-press dùng UILongPressGestureRecognizer đặt TRÊN
+///   webview với `cancelsTouchesInView = false` → tap / swipe / pinch /
+///   video controls HOÀN TOÀN không bị ảnh hưởng. Hành vi Back do
+///   ContentView (`handleBackGesture`) quyết định: webview TUBE còn lịch
+///   sử → goBack 1 bước; hết lịch sử → lùi về tab trước đó; màn gốc →
+///   NO-OP (KHÔNG thoát app, KHÔNG về Home). Menu giờ chỉ mở bằng vuốt
+///   cạnh phải.
 /// - **Video tự động toàn màn hình**: khi video thực sự bắt đầu phát
 ///   (event `playing`, 1 lần mỗi trang) → tự vào theater mode + video lên
 ///   WebKit native fullscreen. Cơ chế fullscreen của WebKit là cơ chế
@@ -32,8 +35,8 @@ struct MovieListView: View {
     /// cũ → scale SE 32.8pt … Pro Max 44pt): hết cảnh nút quá cỡ trên màn
     /// nhỏ che video / khó bấm. WebView + toàn bộ logic browser GIỮ NGUYÊN.
     @Environment(\.uiProps) private var props
-    /// Long-press trên webview → hiện menu tab (ContentView sở hữu state
-    /// ẩn/hiện overlay — cơ chế gesture giữ nguyên từ bản cũ).
+    /// [build 235] Long-press trên webview → BACK 1 bước (ContentView sở
+    /// hữu chuỗi Back `handleBackGesture` — trước đây là hiện menu tab).
     var onLongPress: () -> Void = {}
     /// [2026-09-12, build 221] Tab TUBE có đang được chọn hay không —
     /// ContentView truyền vào. Trang TUBE GIỮ NGUYÊN trong hierarchy khi
@@ -136,7 +139,7 @@ private struct YouTubeWebView: UIViewRepresentable {
 
 final class YouTubeBrowser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
     let webView: WKWebView
-    /// Long-press trên webview → hiện menu tab (gắn bởi MovieListView).
+    /// [build 235] Long-press trên webview → BACK 1 bước (gắn bởi MovieListView).
     var onLongPress: (() -> Void)?
 
     @Published var isOnVideoPage = false
@@ -403,19 +406,20 @@ final class YouTubeBrowser: NSObject, ObservableObject, WKNavigationDelegate, WK
         webView.allowsBackForwardNavigationGestures = true
         // Pinch 2 ngón tay để zoom / fit màn hình.
         enablePinchZoom()
-        // GIỮ MÀN HÌNH (~0.4s) → toggle theater mode.
+        // [build 235] GIỮ MÀN HÌNH (~0.4s) → BACK 1 bước (trước đây là
+        // toggle theater mode, sau đó hiện menu tab).
         // Recognizer đặt TRÊN chính webview, cancelsTouchesInView = false +
         // delaysTouchesBegan = false: tap, swipe, pinch, video controls
         // nhận touch bình thường, không bị trễ hay chặn; recognizer chỉ
         // kích hoạt khi ngón tay giữ yên đủ 0.4s.
-        let immersiveGesture = UILongPressGestureRecognizer(
+        let backGesture = UILongPressGestureRecognizer(
             target: self,
-            action: #selector(handleImmersiveLongPress(_:))
+            action: #selector(handleBackLongPress(_:))
         )
-        immersiveGesture.minimumPressDuration = 0.4
-        immersiveGesture.cancelsTouchesInView = false
-        immersiveGesture.delaysTouchesBegan = false
-        webView.addGestureRecognizer(immersiveGesture)
+        backGesture.minimumPressDuration = 0.4
+        backGesture.cancelsTouchesInView = false
+        backGesture.delaysTouchesBegan = false
+        webView.addGestureRecognizer(backGesture)
         webView.load(URLRequest(url: URL(string: "https://www.youtube.com")!))
     }
 
@@ -427,14 +431,14 @@ final class YouTubeBrowser: NSObject, ObservableObject, WKNavigationDelegate, WK
 
     // MARK: - Theater mode (toàn màn hình)
 
-    /// Long-press trên webview → ẩn/hiện tab bar + mở rộng/thu nhỏ nội dung.
-    /// (state .began của UILongPressGestureRecognizer = đã giữ đủ 0.35s.)
-    @objc private func handleImmersiveLongPress(_ gesture: UILongPressGestureRecognizer) {
+    /// [build 235] Long-press trên webview → BACK 1 bước.
+    /// (state .began của UILongPressGestureRecognizer = đã giữ đủ 0.4s.)
+    /// Trước build 235 long-press = hiện menu tab; nay menu chỉ mở bằng
+    /// vuốt cạnh phải, long-press = nút Back kiểu Android TV (ContentView
+    /// xử lý: webview goBack → lùi tab → NO-OP ở màn gốc, không thoát app).
+    @objc private func handleBackLongPress(_ gesture: UILongPressGestureRecognizer) {
         guard gesture.state == .began else { return }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        // HIỆN MENU TAB (LIVE TV/TUBE/PHIM/SETTINGS) — nhất quán 4 tab.
-        // (Hành vi cũ = toggle theater mode — thay thế: tab bar giờ ẩn
-        //  theo mặc định bởi ContentView, long-press dùng để gọi menu.)
         onLongPress?()
     }
 
