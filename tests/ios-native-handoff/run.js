@@ -22,10 +22,17 @@
  *     MKV/AVI/FLV/WMV/RMVB/DIVX/MPG → native; MP4 + AC3/EAC3/DTS/TrueHD/
  *     Atmos → native; HLS → để web thử trước; không dính false-positive
  *     (đuôi nằm trong query, "dtsxtra", …).
- *   SUITE E (build 233) — KẾT THÚC PHÁT, PHIM BỘ / PHIM LẺ:
- *     BỘ còn tập: native/web hết tập → prepareNext (giữ player) + tự chuyển
- *     tập; BỘ đóng player / hết tập cuối → về CHỌN TẬP; LẺ hết/đóng → về
- *     lưới PHIM; race đóng-giữa-chuyển-tập bị dập (không tự bật lại).
+ *   SUITE E (build 233 → 234) — KẾT THÚC PHÁT, PHIM BỘ / PHIM LẺ:
+ *     BỘ còn tập: native/web hết tập → ĐÓNG TRÌNH PHÁT rồi TỰ ĐỘNG phát tập
+ *     kế tiếp (build 234: không dừng ở màn hình chọn tập, không còn
+ *     prepareNext giữ player); BỘ hết tập cuối → về CHỌN TẬP; LẺ hết → về
+ *     lưới PHIM; Return của người dùng → huỷ lần tự chuyển tập đang chờ.
+ *   SUITE F (build 234) — ƯU TIÊN TRÌNH PHÁT + GESTURE ĐIỀU HƯỚNG:
+ *     Ưu tiên 1 = trình phát TÍCH HỢP của app (thẻ <video>): nguồn MKV/AC3
+ *     cũng KHÔNG được handoff sớm sang trình phát iOS; chỉ khi trình phát
+ *     tích hợp THẤT BẠI mới fallback (reason "web-streams-exhausted").
+ *     Kèm cầu nối gesture: __bintvPhimReturn (Return trong web app) + tua
+ *     __bintvPlayerBeginSeek/SeekTo/EndSeek + mirror uiState về Swift.
  *
  * Các hàm của SUITE B được TRÍCH TRỰC TIẾP từ app.js (không chép tay) nên
  * test luôn bám theo code thật.
@@ -94,6 +101,7 @@ function makeWindow(url, withBridge) {
     if (withBridge) {
         win.__posted = [];
         win.__lifecyclePosted = [];
+        win.__bridgePosted = [];
         win.webkit = {
             messageHandlers: {
                 playVideoNative: {
@@ -101,7 +109,11 @@ function makeWindow(url, withBridge) {
                         win.__posted.push(JSON.parse(JSON.stringify(payload)));
                     }
                 },
-                phimBridge: { postMessage: function () {} },
+                phimBridge: {
+                    postMessage: function (payload) {
+                        win.__bridgePosted.push(JSON.parse(JSON.stringify(payload)));
+                    }
+                },
                 phimConsole: { postMessage: function () {} },
                 phimLifecycle: {
                     postMessage: function (payload) {
@@ -580,6 +592,12 @@ function suiteE() {
     check("E", "app.js expose __bintvNativePlaybackEnded", typeof winE0.__bintvNativePlaybackEnded === "function");
     check("E", "app.js expose __bintvMoviePlaybackHooks", typeof winE0.__bintvMoviePlaybackHooks === "object");
     check("E", "cầu nối có __bintvPrepareNextNativeEpisode", typeof winE0.__bintvPrepareNextNativeEpisode === "function");
+    check("E", "app.js expose __bintvPhimReturn (Return trong web app)",
+          typeof winE0.__bintvPhimReturn === "function");
+    check("E", "app.js expose __bintvPlayerBeginSeek/SeekTo/EndSeek (tua bằng gesture)",
+          typeof winE0.__bintvPlayerBeginSeek === "function"
+          && typeof winE0.__bintvPlayerSeekTo === "function"
+          && typeof winE0.__bintvPlayerEndSeek === "function");
     const swiftSrcE = fs.readFileSync(SWIFT_WEBVIEW, "utf8");
     const nativeSrcE = fs.readFileSync(path.join(REPO, "BinTV", "Player", "PhimNativePlayerController.swift"), "utf8");
     check("E", "Swift nối onEnded → __bintvNativePlaybackEnded", /nativePlayer\.onEnded/.test(swiftSrcE) && /__bintvNativePlaybackEnded/.test(swiftSrcE));
@@ -588,24 +606,36 @@ function suiteE() {
           && /endedGraceTimeout/.test(nativeSrcE) && /autoCloseAfterEnded/.test(nativeSrcE));
     check("E", "native player có prepareNextEpisode()", /func prepareNextEpisode\(\)/.test(nativeSrcE));
 
-    // --- E1: phim BỘ hết tập (native) còn tập → prepareNext + chuyển tập -
+    // --- E1: phim BỘ hết tập (native) còn tập --------------------------
+    // [build 234] Trình phát ĐÓNG ngay khi hết tập (action "stop"), sau đó
+    // tự động nạp & phát tập kế tiếp — KHÔNG giữ player mở (prepareNext),
+    // KHÔNG dừng ở màn hình chọn tập.
     const win1 = bootSeries(0);
     win1.__bintvMoviePlaybackHooks.setHandoffActive(true);
     win1.__bintvMoviePlaybackHooks.setPreferNative(true);
     win1.__posted.length = 0;
     win1.__bintvNativePlaybackEnded({});
     const posted1 = win1.__posted.map(function (m) { return m.action || "play"; });
-    check("E", "BỘ còn tập, native-ended → báo prepareNext giữ player",
-          posted1.indexOf("prepareNext") >= 0, JSON.stringify(posted1));
-    check("E", "→ KHÔNG gửi stop (player không bị đóng)", posted1.indexOf("stop") === -1, JSON.stringify(posted1));
+    check("E", "BỘ còn tập, native-ended → ĐÓNG trình phát iOS (action stop)",
+          posted1.indexOf("stop") >= 0, JSON.stringify(posted1));
+    check("E", "→ KHÔNG còn prepareNext (không giữ player mở nữa)",
+          posted1.indexOf("prepareNext") === -1, JSON.stringify(posted1));
     const st1 = win1.__bintvMoviePlaybackHooks.getState();
-    check("E", "→ chuyển sang tập kế (current 0→1, switch đang chạy)",
-          st1.current === 1 && st1.switchInProgress === true, JSON.stringify(st1));
-    check("E", "→ cờ native-preference vẫn giữ (tiếp tục trong native)",
-          st1.preferNative === true && st1.handoffActive === true, JSON.stringify(st1));
-    check("E", "→ trạng thái player báo đang chuyển tập",
-          (win1.document.getElementById("bintv-movie-player-status").textContent || "").indexOf("Đang chuyển") >= 0,
-          win1.document.getElementById("bintv-movie-player-status").textContent);
+    check("E", "→ bắt đầu tự chuyển tập (current 0→1, autoAdvance, switch chạy)",
+          st1.current === 1 && st1.autoAdvance === true && st1.switchInProgress === true,
+          JSON.stringify(st1));
+    check("E", "→ cờ native đã hạ (tập kế phát bằng trình phát tích hợp)",
+          st1.preferNative === false && st1.handoffActive === false, JSON.stringify(st1));
+    check("E", "→ player web đã đóng trước khi nạp tập kế",
+          st1.playerOpen === false
+          && !win1.document.getElementById("bintv-movie-player").classList.contains("show"),
+          JSON.stringify(st1));
+    check("E", "→ KHÔNG dừng ở màn hình chọn tập (picker chưa mở)",
+          !win1.document.getElementById("bintv-movie-episodes").classList.contains("show"));
+    check("E", "→ trạng thái báo đang chuẩn bị/nạp tập tiếp theo",
+          /(tập tiếp theo|Đang tìm nguồn phát)/.test(
+              win1.document.getElementById("bintv-movie-status").textContent || ""),
+          win1.document.getElementById("bintv-movie-status").textContent);
 
     // --- E2: phim BỘ hết tập CUỐI (native) → stop + về CHỌN TẬP ----------
     const win2 = bootSeries(2);
@@ -675,16 +705,41 @@ function suiteE() {
     const st6 = win6.__bintvMoviePlaybackHooks.getState();
     check("E", "→ cờ playerOpen đã hạ", st6.playerOpen === false, JSON.stringify(st6));
 
-    // --- E7: RACE — đóng player giữa chừng chuyển tập → kết quả bị huỷ ---
+    // --- E7: RACE — callback đóng player trong lúc tự chuyển tập ---------
+    // [build 234] startMovieAutoAdvance đã tự đóng trình phát (stop) → nếu
+    // Swift vẫn bắn thêm onClosed (backstop/người dùng đóng đúng lúc) thì
+    // KHÔNG được dập luồng tập kế cũng KHÔNG được mở lại màn hình chọn tập.
     const win7 = bootSeries(0);
-    win7.__bintvNativePlaybackEnded({});        // bắt đầu tự chuyển tập (fetch chờ)
-    check("E", "RACE: switch bắt đầu", win7.__bintvMoviePlaybackHooks.getState().switchInProgress === true);
-    win7.__bintvNativePlaybackClosed({});       // người dùng đóng ngay sau đó
+    win7.__bintvMoviePlaybackHooks.setHandoffActive(true);
+    win7.__bintvNativePlaybackEnded({});        // bắt đầu tự chuyển tập (đang nạp nguồn)
+    check("E", "RACE: tự chuyển tập đã bắt đầu", win7.__bintvMoviePlaybackHooks.getState().autoAdvance === true);
+    win7.__bintvNativePlaybackClosed({});       // đóng đến muộn
     const st7 = win7.__bintvMoviePlaybackHooks.getState();
-    check("E", "RACE: đóng giữa switch → switch bị dập, không tự bật lại",
-          st7.switchInProgress === false && st7.playerOpen === false, JSON.stringify(st7));
-    check("E", "RACE: phim bộ đóng → vẫn về CHỌN TẬP",
-          win7.document.getElementById("bintv-movie-episodes").classList.contains("show"));
+    check("E", "RACE: đóng đến muộn → luồng tập kế KHÔNG bị dập",
+          st7.autoAdvance === true && st7.current === 1 && st7.playerOpen === false, JSON.stringify(st7));
+    check("E", "RACE: → KHÔNG mở lại CHỌN TẬP khi tập kế đang được nạp",
+          !win7.document.getElementById("bintv-movie-episodes").classList.contains("show"));
+    // Người dùng chủ động Return (vuốt cạnh trái) → huỷ lần tự chuyển tập.
+    check("E", "RACE: Return ở màn hình gốc PHIM → false (Swift lùi tab trước)",
+          win7.__bintvPhimReturn() === false);
+    const st7b = win7.__bintvMoviePlaybackHooks.getState();
+    check("E", "RACE: Return của người dùng → huỷ tự chuyển tập đang chờ",
+          st7b.autoAdvance === false && st7b.switchInProgress === false, JSON.stringify(st7b));
+
+    // --- E9: Return của người dùng khi ĐANG phát (trình phát tích hợp) ---
+    const win9 = bootSeries(1);
+    const handled9 = win9.__bintvPhimReturn();
+    const st9 = win9.__bintvMoviePlaybackHooks.getState();
+    check("E", "Return khi player mở → web app xử lý (trả true)", handled9 === true);
+    check("E", "→ đóng player + về CHỌN TẬP (phim bộ)",
+          st9.playerOpen === false
+          && win9.document.getElementById("bintv-movie-episodes").classList.contains("show"),
+          JSON.stringify(st9));
+    win9.__bintvMoviePlaybackHooks.pushUiState();
+    const mirror9 = win9.__bridgePosted[win9.__bridgePosted.length - 1];
+    check("E", "→ mirror uiState báo playerOpen=false, canReturn=true (picker mở)",
+          !!mirror9 && mirror9.playerOpen === false && mirror9.canReturn === true,
+          JSON.stringify(mirror9));
 
     // --- E8: callback lệch session bị loại --------------------------------
     const win8 = bootSeries(0);
@@ -696,11 +751,140 @@ function suiteE() {
           JSON.stringify(win8.__posted));
 }
 
+// =====================================================================
+// SUITE F — [build 234] ƯU TIÊN TRÌNH PHÁT + CẦU NỐI GESTURE ĐIỀU HƯỚNG
+// =====================================================================
+function suiteF() {
+    console.log("\n=== SUITE F: trình phát tích hợp trước + gesture điều hướng (build 234) ===");
+    const appSrc = fs.readFileSync(path.join(ASSETS, "app.js"), "utf8");
+    const contentSrc = fs.readFileSync(path.join(REPO, "BinTV", "Views", "ContentView.swift"), "utf8");
+    const webViewSrc = fs.readFileSync(SWIFT_WEBVIEW, "utf8");
+    const nativeSrc = fs.readFileSync(path.join(REPO, "BinTV", "Player", "PhimNativePlayerController.swift"), "utf8");
+
+    // --- F0: chính sách ưu tiên trình phát trong mã nguồn ---------------
+    check("F", "app.js có chính sách MOVIE_INTEGRATED_PLAYER_FIRST",
+          /MOVIE_INTEGRATED_PLAYER_FIRST\s*=\s*true/.test(appSrc));
+    check("F", "KHÔNG còn pre-flight handoff (mở trình phát iOS ngay từ đầu)",
+          appSrc.indexOf("moviePreferNativePlayer || needNativeNow") < 0);
+    check("F", "fallback sau khi trình phát tích hợp lỗi vẫn còn",
+          /requestNativeMoviePlayback\("web-streams-exhausted"/.test(appSrc));
+    check("F", "phim_ios_fallback.js vẫn nối lỗi web → trình phát iOS",
+          /__bintvRequestNativePlayback/.test(fs.readFileSync(path.join(ASSETS, "phim_ios_fallback.js"), "utf8")));
+
+    // --- F1: runtime — nguồn MKV/AC3 vẫn do TRÌNH PHÁT TÍCH HỢP thử trước -
+    const win = makeWindow("http://127.0.0.1:3000/?android=phone&ios=landscape", true);
+    bootWebApp(win, scriptList(false));
+    const hooks = win.__bintvMoviePlaybackHooks;
+    hooks.setBrowserOpen(true);
+    win.__posted.length = 0;
+    hooks.startPlayback("https://cdn.vnstream.xyz/f/movie.mkv", "Phim MKV AC3",
+                        { name: "1080p AC3", stream: { name: "1080p AC3" } });
+    check("F", "nguồn MKV/AC3 → KHÔNG mở trình phát iOS ngay từ đầu",
+          win.__posted.length === 0, JSON.stringify(win.__posted));
+    const video = win.document.getElementById("bintv-movie-html5-player");
+    check("F", "→ trình phát TÍCH HỢP (<video>) nhận nguồn",
+          !!video && !!video.getAttribute("src"),
+          video ? String(video.getAttribute("src")) : "không có thẻ video");
+    check("F", "→ overlay trình phát tích hợp đang mở",
+          win.document.getElementById("bintv-movie-player").classList.contains("show"));
+
+    // --- F2: trình phát tích hợp THẤT BẠI → lúc này mới fallback sang iOS -
+    hooks.playbackError();
+    const handoff = win.__posted.filter(function (m) { return m.action !== "stop"; });
+    check("F", "tích hợp lỗi (hết nguồn web) → handoff sang trình phát iOS",
+          handoff.length === 1, JSON.stringify(win.__posted));
+    check("F", "→ reason = web-streams-exhausted",
+          handoff.length === 1 && handoff[0].reason === "web-streams-exhausted",
+          handoff.length ? JSON.stringify(handoff[0]) : "không gửi gì");
+
+    // --- F3: cầu nối Return của web app ---------------------------------
+    const winG = makeWindow("http://127.0.0.1:3000/?android=phone&ios=landscape", true);
+    bootWebApp(winG, scriptList(false));
+    const hooksG = winG.__bintvMoviePlaybackHooks;
+    hooksG.setBrowserOpen(true);
+    check("F", "Return ở màn hình gốc PHIM → false (Swift lùi về tab trước)",
+          winG.__bintvPhimReturn() === false);
+    hooksG.setEpisodes([
+        { id: "tt-ep1", title: "Tập 1", episode: 1, season: 1 },
+        { id: "tt-ep2", title: "Tập 2", episode: 2, season: 1 }
+    ], "series", "Phim Bộ Thử", 0);
+    hooksG.reopenPicker();
+    check("F", "mở CHỌN TẬP → Return xử lý NGAY trong web app (true)",
+          winG.__bintvPhimReturn() === true);
+    check("F", "→ overlay CHỌN TẬP đã đóng",
+          !winG.document.getElementById("bintv-movie-episodes").classList.contains("show"));
+
+    // --- F4: mirror uiState về Swift (gesture phải trả lời NGAY) --------
+    hooksG.setPlayerOpen(true);
+    winG.document.getElementById("bintv-movie-player").classList.add("show");
+    hooksG.pushUiState();
+    let mirror = winG.__bridgePosted[winG.__bridgePosted.length - 1];
+    check("F", "phimBridge nhận uiState {action, canReturn, playerOpen}",
+          !!mirror && mirror.action === "uiState"
+          && mirror.canReturn === true && mirror.playerOpen === true,
+          JSON.stringify(mirror));
+    hooksG.setPlayerOpen(false);
+    winG.document.getElementById("bintv-movie-player").classList.remove("show");
+    hooksG.pushUiState();
+    mirror = winG.__bridgePosted[winG.__bridgePosted.length - 1];
+    check("F", "→ đóng player: mirror cập nhật playerOpen=false",
+          !!mirror && mirror.playerOpen === false, JSON.stringify(mirror));
+
+    // --- F5: tua bằng gesture trong trình phát tích hợp -----------------
+    const winS = makeWindow("http://127.0.0.1:3000/?android=phone&ios=landscape", true);
+    bootWebApp(winS, scriptList(false));
+    winS.__bintvMoviePlaybackHooks.setBrowserOpen(true);
+    winS.__bintvMoviePlaybackHooks.startPlayback("https://cdn.vn/x/movie.mp4", "Phim Lẻ",
+                                                 { name: "1080p AAC" });
+    const bounds = winS.__bintvPlayerBeginSeek();
+    check("F", "__bintvPlayerBeginSeek trả vị trí/thời lượng của trình phát",
+          !!bounds && typeof bounds.position === "number" && typeof bounds.duration === "number",
+          JSON.stringify(bounds));
+    check("F", "__bintvPlayerSeekTo(giây) thực hiện tua (không lỗi)",
+          winS.__bintvPlayerSeekTo(120) === true);
+    check("F", "__bintvPlayerSeekTo từ chối giá trị không hợp lệ",
+          winS.__bintvPlayerSeekTo(NaN) === false && winS.__bintvPlayerSeekTo(-5) === false);
+    check("F", "__bintvPlayerEndSeek kết thúc phiên tua", winS.__bintvPlayerEndSeek() === true);
+
+    // --- F7: lỗi "ma" đến muộn SAU khi trình phát đã đóng → không handoff -
+    const winL = makeWindow("http://127.0.0.1:3000/?android=phone&ios=landscape", true);
+    bootWebApp(winL, scriptList(false));
+    const hooksL = winL.__bintvMoviePlaybackHooks;
+    hooksL.setBrowserOpen(true);
+    hooksL.startPlayback("https://cdn.vn/x/movie.mp4", "Phim Lẻ", { name: "1080p AAC" });
+    winL.__posted.length = 0;
+    hooksL.setPlayerOpen(false);              // người dùng Return / tự chuyển tập
+    winL.document.getElementById("bintv-movie-html5-player")
+        .dispatchEvent(new winL.Event("error"));
+    check("F", "lỗi đến muộn sau khi trình phát đóng → KHÔNG mở trình phát iOS",
+          winL.__posted.length === 0, JSON.stringify(winL.__posted));
+
+    // --- F6: wiring Swift của gesture (nguồn) ---------------------------
+    check("F", "ContentView: BinTVPlayerGestureHub (ngữ cảnh trình phát)",
+          /final class BinTVPlayerGestureHub/.test(contentSrc)
+          && /struct BinTVPlayerGestureContext/.test(contentSrc));
+    check("F", "ContentView: có trình phát → vuốt ngang cạnh = TUA (không Return)",
+          /seekSession/.test(contentSrc) && /applySeek\(/.test(contentSrc));
+    check("F", "ContentView: vuốt từ TRÊN xuống = đóng trình phát (Return)",
+          /edge == \.top/.test(contentSrc) && /player\.close\(\)/.test(contentSrc));
+    check("F", "ContentView: recognizer .top chỉ gắn 1 lần + nhận khi có player",
+          /installEdgeSwipe\(\.top/.test(contentSrc));
+    check("F", "PhimWebView.swift đăng ký ngữ cảnh trình phát web",
+          /BinTVPlayerGestureHub\.shared\.register/.test(webViewSrc));
+    check("F", "PhimNativePlayerController.swift đăng ký ngữ cảnh trình phát iOS",
+          /BinTVPlayerGestureHub\.shared\.register/.test(nativeSrc));
+    check("F", "Return của tab PHIM đi qua web app (__bintvPhimReturn)",
+          /__bintvPhimReturn/.test(webViewSrc));
+    check("F", "PhimWebView.swift xử lý message uiState từ web app",
+          /"uiState"/.test(webViewSrc));
+}
+
 async function main() {
     suiteA();
     suiteB();
     suiteC();
     suiteE();
+    suiteF();
     await suiteD();
     console.log("\n=========================================");
     console.log("PASS: " + pass + "   FAIL: " + fail);
