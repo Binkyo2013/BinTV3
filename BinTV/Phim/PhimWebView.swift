@@ -86,6 +86,38 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     /// (LIVE TV/TUBE/PHIM/SETTINGS) — nhất quán 4 tab. Gắn bởi PhimView.
     var onLongPress: (() -> Void)?
 
+    // =================================================================
+    // [build 234 — 2026-09-15] GESTURE ĐIỀU HƯỚNG THEO NGỮ CẢNH TRÌNH PHÁT
+    //
+    // Yêu cầu: KHÔNG ở trong trình phát → vuốt từ cạnh trái = RETURN về màn
+    // hình trước; ĐANG ở trong trình phát → vuốt NGANG từ cạnh trái/phải =
+    // TUA (như kéo thanh tiến trình), vuốt từ TRÊN xuống = RETURN (đóng
+    // trình phát, quay về màn hình trước khi phát).
+    //
+    // Gesture nằm trên UIWindow (BinTVWindowGestures) nhưng phải quyết định
+    // NGAY là TUA hay RETURN → web app mirror trạng thái UI về đây bằng
+    // message `phimBridge` action "uiState" (chỉ gửi khi đổi, ~1s/lần khi
+    // đang phát) — không thể chờ evaluateJavaScript cho mỗi cú vuốt.
+    // =================================================================
+    /// Web app đang có gì đó để Return? (trình phát/chọn tập/menu con…)
+    private var webUiCanReturn = false
+    /// Trình phát TÍCH HỢP (thẻ <video> trong web app) đang mở?
+    private var webPlayerOpen = false
+    /// Vị trí (giây) + thời lượng (giây) của trình phát tích hợp — mirror từ
+    /// web app, là GỐC để tính đích tua tuyệt đối khi người dùng vuốt ngang.
+    private var webPlayerPosition: Double = 0
+    private var webPlayerDuration: Double = 0
+    /// Nhịp gửi lệnh tua gần nhất (chống spam evaluateJavaScript).
+    private var lastWebSeekDispatch: CFTimeInterval = 0
+    /// [build 234] Tab PHIM có đang được chọn? (gesture của tab khác không
+    /// được lùi/tua vào trình phát ẩn của PHIM — xem `setTabActive`.)
+    private(set) var tabIsActive = false
+
+    /// ContentView báo tab PHIM được chọn/bị rời (PhimView.isActive).
+    func setTabActive(_ active: Bool) {
+        tabIsActive = active
+    }
+
     override init() {
         PhimDebugLog.step("WEBVIEW", "controllerInit", "begin")
         let configuration = Self.makeWebViewConfiguration()
@@ -94,6 +126,7 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
 
         configure(webView, configuration: configuration)
         configureNativePlayerCallbacks()
+        registerGestureContext()
         installLifecycleObservers()
         registerBackHandler()
         PhimDebugLog.step("WEBVIEW", "controllerInit", "ok",
@@ -183,11 +216,93 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         }
     }
 
+    /// [build 234] Đăng ký NGỮ CẢNH TRÌNH PHÁT TÍCH HỢP cho gesture điều
+    /// hướng (vuốt ngang cạnh = TUA, vuốt trên-xuống = RETURN/đóng player).
+    /// Idempotent theo `name` nên gọi lại khi controller init lại không sinh
+    /// trùng lặp.
+    private func registerGestureContext() {
+        BinTVPlayerGestureHub.shared.register(BinTVPlayerGestureContext(
+            name: "phim-web-player",
+            isNative: false,
+            isActive: { [weak self] in
+                guard let self = self else { return false }
+                // Trình phát chỉ "đang mở" khi tab PHIM đang hiển thị — nếu
+                // người dùng đã chuyển sang tab khác thì vuốt cạnh phải là
+                // Return của tab đó, không phải tua vào player ẩn.
+                return self.tabIsActive && self.webPlayerOpen
+            },
+            position: { [weak self] in self?.webPlayerPosition ?? 0 },
+            duration: { [weak self] in self?.webPlayerDuration ?? 0 },
+            beginSeek: { [weak self] in
+                // Hiện thanh tiến trình y như khi người dùng kéo seek bar.
+                PhimDebugLog.step("GESTURE", "webSeek", "begin",
+                                  "position=\(Int((self?.webPlayerPosition ?? 0).rounded()))s")
+                self?.evaluateJS("try { window.__bintvPlayerBeginSeek && window.__bintvPlayerBeginSeek(); } catch (e) {}")
+            },
+            seekTo: { [weak self] seconds in
+                self?.seekWebPlayer(to: seconds)
+            },
+            endSeek: { [weak self] in
+                self?.evaluateJS("try { window.__bintvPlayerEndSeek && window.__bintvPlayerEndSeek(); } catch (e) {}")
+            },
+            close: { [weak self] in
+                // Vuốt từ trên xuống = RETURN: đóng trình phát, quay về màn
+                // hình trước khi phát (Return của chính web app PHIM).
+                self?.performWebReturn(reason: "swipe-down")
+            }))
+        PhimDebugLog.step("GESTURE", "registerContext", "ok", "player=phim-web-player")
+    }
+
+    /// Chạy JS trên webview hiện tại (bỏ qua kết quả) — an toàn cả khi
+    /// webview đang được thay thế/đang nạp lại.
+    private func evaluateJS(_ js: String) {
+        // [CI 2026-09-13] Ghi rõ kiểu () -> Void để tránh suy luận () -> Void?
+        let run: () -> Void = { [weak self] in
+            self?.webView.evaluateJavaScript(js, completionHandler: nil)
+        }
+        if Thread.isMainThread { run() } else { DispatchQueue.main.async(execute: run) }
+    }
+
+    /// [build 234] Tua TRÌNH PHÁT TÍCH HỢP tới giây thứ N (gesture kéo ngang ở
+    /// cạnh màn hình). Nhịp ~12 lệnh/giây để không spam seek.
+    private func seekWebPlayer(to seconds: Double) {
+        let now = CFAbsoluteTimeGetCurrent()
+        if now - lastWebSeekDispatch < 0.08 { return }
+        lastWebSeekDispatch = now
+        let value = max(0, seconds)
+        PhimDebugLog.step("GESTURE", "webSeek", "go", "target=\(Int(value.rounded()))s")
+        evaluateJS("try { window.__bintvPlayerSeekTo && window.__bintvPlayerSeekTo(\(value)); } catch (e) {}")
+    }
+
+    /// [build 234] RETURN của chính web app PHIM: đóng trình phát/menu con/
+    /// chọn tập… Nếu web app đang ở màn hình gốc, nó trả false (không còn gì
+    /// để Return) → khi đó người gọi tự lùi về màn hình/tab trước.
+    private func performWebReturn(reason: String) {
+        PhimDebugLog.step("GESTURE", "webReturn", "go",
+                          "reason=\(reason) canReturn=\(webUiCanReturn)")
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        evaluateJS("try { window.__bintvPhimReturn && window.__bintvPhimReturn(); } catch (e) {}")
+    }
+
     private func registerBackHandler() {
         BinTVBackRegistry.shared.register(tab: BinTVPage.phim.rawValue) { [weak self] in
-            guard let self = self, self.webView.canGoBack else { return false }
-            self.webView.goBack()
-            return true
+            guard let self = self else { return false }
+            // [build 234] RETURN = logic điều hướng của CHÍNH web app PHIM
+            // (đóng trình phát/menu con/phụ đề/chọn tập…) — KHÔNG dùng gesture
+            // Back mặc định của iOS. Trạng thái "còn gì để Return" được web
+            // app mirror về (`webUiCanReturn`) nên trả lời được NGAY.
+            if self.webUiCanReturn {
+                self.performWebReturn(reason: "edge-swipe")
+                return true
+            }
+            // Web app đang ở màn hình gốc: nếu WebKit còn lịch sử thật thì lùi
+            // 1 bước (an toàn), còn lại trả false để ContentView lùi về tab đã
+            // xem trước đó.
+            if self.webView.canGoBack {
+                self.webView.goBack()
+                return true
+            }
+            return false
         }
     }
 
@@ -1227,6 +1342,19 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         guard let body = message.body as? [String: Any],
               let action = body["action"] as? String else { return }
         switch action {
+        case "uiState":
+            // [build 234] Mirror trạng thái UI PHIM từ web app → gesture điều
+            // hướng (uiState do app.js gửi, xem pushMovieIosUiState):
+            //   • canReturn  : web app còn gì để Return (player/chọn tập/menu)
+            //   • playerOpen : trình phát TÍCH HỢP (<video>) đang mở
+            //   • positionMs/durationMs : vị trí & thời lượng để TUA bằng
+            //     gesture ngang (gốc tính đích tua tuyệt đối).
+            webUiCanReturn = (body["canReturn"] as? Bool) ?? false
+            webPlayerOpen = (body["playerOpen"] as? Bool) ?? false
+            let positionMs = (body["positionMs"] as? NSNumber)?.doubleValue ?? 0
+            let durationMs = (body["durationMs"] as? NSNumber)?.doubleValue ?? 0
+            webPlayerPosition = positionMs > 0 ? positionMs / 1000 : 0
+            webPlayerDuration = durationMs > 0 ? durationMs / 1000 : 0
         case "landscape":
             // phim_player_ui.js: player mở → "1" (buộc landscape);
             // player đóng → "0" (GIỮ landscape — chế độ TV, không xoay dọc).
@@ -2150,9 +2278,13 @@ struct PhimView: View {
         .onAppear {
             // Lần đầu tab PHIM được mở: khởi server + tải web app
             // (idempotent — `started` guard).
+            controller.setTabActive(isActive)
             controller.startAndLoadIfNeeded()
         }
         .onChange(of: isActive) { active in
+            // [build 234] Gesture điều hướng cần biết tab PHIM có đang hiển
+            // thị hay không (chỉ khi đó trình phát web mới "đang mở").
+            controller.setTabActive(active)
             // MỖI LẦN QUAY LẠI TAB PHIM (kể cả sau nhiều lần chuyển
             // qua lại): repaint layer + khôi phục nếu webview trống.
             // KHÔNG reload khi trạng thái hiện tại vẫn dùng được.

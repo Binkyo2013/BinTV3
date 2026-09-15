@@ -273,17 +273,62 @@
     //   • Trình phát native (AVPlayerViewController) KHÔNG được treo: hết
     //     tập là phải chuyển hoặc đóng (Swift có backstop tự đóng khi JS
     //     im lặng — xem PhimNativePlayerController.swift).
-    // moviePreferNativePlayer: native ĐANG là player hiển thị → mọi lần
-    // phát TIẾP THEO của cùng phim (tự chuyển tập / đổi tập trong menu /
-    // nguồn dự phòng) phải TIẾP TỤC chạy trong native — thẻ <video> nằm
-    // SAU AVPlayerViewController nên nếu nó phát thì người dùng chỉ nghe
-    // tiếng mà không thấy hình. Reset khi player đóng hẳn / native fail.
+    // moviePreferNativePlayer: [build 234] chỉ còn là CỜ CHẨN ĐOÁN "trình
+    // phát iOS đang là player hiển thị" (được đặt khi handoff thành công, hạ
+    // khi player đóng/fail). TỪ build 234 cờ này KHÔNG còn quyền quyết định
+    // đường phát: mọi lần phát đều bắt đầu bằng TRÌNH PHÁT TÍCH HỢP (thẻ
+    // <video>) — xem khối chính sách MOVIE_INTEGRATED_PLAYER_FIRST.
     var moviePreferNativePlayer = false;
     // Serial của lần CHUYỂN TẬP trong player (đổi tập tay / tự next-tập).
     // Lần chuyển tập đang nạp nguồn bị VÔ HIỆU khi: (a) người dùng đóng hẳn
     // player, (b) người dùng chọn phim / tập khác — chống player (kể cả
     // native) tự BẬT LẠI sau khi người dùng đã đóng (race mạng chậm).
     var movieEpisodeSwitchSerial = 0;
+    // =================================================================
+    // [build 234 — 2026-09-15] HẾT TẬP → TRÌNH PHÁT TỰ ĐÓNG → TỰ PHÁT TẬP KẾ
+    //
+    // Yêu cầu: phim BỘ nhiều tập — tập phát hết thì trình phát TỰ ĐÓNG (như
+    // hiện tại), sau đó TỰ ĐỘNG phát tập tiếp theo; KHÔNG dừng lại ở màn
+    // hình chọn tập. Phim LẺ giữ nguyên: hết → đóng → về giao diện PHIM.
+    //
+    // Cơ chế (một luồng duy nhất cho CẢ HAI đường phát):
+    //   1. hết tập → nếu còn tập kế: ĐÓNG hẳn trình phát (native: action
+    //      "stop"; web: gỡ overlay player);
+    //   2. nạp nguồn của tập kế (loadMovieStreams với guard serial riêng);
+    //   3. có nguồn → startMoviePlayback mở lại trình phát với tập kế.
+    // Mọi thao tác người dùng (Return / chọn tập-phim khác / rời màn hình
+    // PHIM) đều VÔ HIỆU lần tự chuyển tập đang chờ ⇒ không bao giờ "tự bật
+    // lại" ngoài ý muốn (race mạng chậm).
+    // =================================================================
+    var movieAutoAdvanceActive = false;
+    var movieAutoAdvanceSerial = 0;
+    var movieAutoAdvanceOrigin = "";
+    // Trạng thái UI PHIM mirror về Swift — gesture điều hướng (Return / tua)
+    // phải trả lời NGAY, không thể chờ evaluateJavaScript.
+    var movieIosUiStateLastSignature = "";
+    // =================================================================
+    // [build 234 — 2026-09-15] CHÍNH SÁCH ƯU TIÊN TRÌNH PHÁT (THAY ĐỔI)
+    //
+    //   Ưu tiên 1 (LUÔN thử trước): TRÌNH PHÁT TÍCH HỢP của BinTV/PHIM —
+    //     thẻ <video> bên trong module PHIM (HUD, phụ đề, chọn tập của app).
+    //   Fallback: TRÌNH PHÁT iOS (AVPlayerViewController của
+    //     PhimNativePlayerController) — CHỈ được mở khi trình phát tích hợp
+    //     KHÔNG THỂ phát: không nguồn tương thích / không mở được video /
+    //     lỗi không thể tiếp tục.
+    //
+    // Bản 231–233 handoff TRƯỚC khi thử (heuristic container/codec
+    // `iosNeedsNativePlayerFor` + cờ `moviePreferNativePlayer` latching) →
+    // trình phát iOS mở NGAY TỪ ĐẦU với phần lớn nguồn Stremio. Yêu cầu mới
+    // cấm điều đó ⇒ đã BỎ pre-flight handoff. Các nhánh fallback sang trình
+    // phát iOS vẫn còn nguyên và đầy đủ, tất cả đều nằm SAU khi trình phát
+    // tích hợp đã lỗi:
+    //   • handleMoviePlaybackError() → hết nguồn web → requestNativeMoviePlayback
+    //   • phim_ios_fallback.js: proxy fail → direct fail → native handoff
+    //   • __bintvNativePlaybackFailed → quay lại nguồn web kế tiếp.
+    // `iosNeedsNativePlayerFor` giữ lại làm CHẨN ĐOÁN (log) — không còn
+    // quyền quyết định mở trình phát iOS trước.
+    // =================================================================
+    var MOVIE_INTEGRATED_PLAYER_FIRST = true;
     var movieBootstrapRequestInFlight = null;
     var movieBootstrapCache = null;
     var moviePrefetchTimer = null;
@@ -4541,6 +4586,7 @@
         movieCatalogScanToken++;
         movieCatalogLoadToken++;
         movieSearchToken++;
+        cancelMovieAutoAdvance();   // [build 234] rời màn hình PHIM → huỷ tự chuyển tập
         movieSearchOpen = false;
         movieSearchResultsActive = false;
         movieFilterMenuOpen = false;
@@ -4568,6 +4614,7 @@
     function openMovieItem(item) {
         if (!item || !item.id || !item.type) return;
         movieEpisodeSwitchSerial += 1;   // [build 233] ý định phát MỚI → vô hiệu mọi chuyển tập đang chờ
+        cancelMovieAutoAdvance();        // [build 234] người dùng mở phim khác → huỷ tự chuyển tập
         if (item.type === "tv") {
             movieEpisodes = [];
             movieCurrentEpisodeIndex = -1;
@@ -4608,6 +4655,7 @@
         movieEpisodeMeta = meta || null;
         movieCurrentEpisodeIndex = -1;
         movieEpisodeOpen = true;
+        pushMovieIosUiState(true);   // [build 234] gesture: có thể Return (đóng chọn tập)
 
         var overlay = document.getElementById("bintv-movie-episodes");
         var titleElement = document.getElementById("bintv-movie-episodes-title");
@@ -4642,6 +4690,7 @@
 
     function closeMovieEpisodes() {
         movieEpisodeOpen = false;
+        pushMovieIosUiState(true);   // [build 234] gesture: mirror trạng thái UI PHIM
         var overlay = document.getElementById("bintv-movie-episodes");
         if (overlay) overlay.classList.remove("show");
         updateMovieBrowserFocus();
@@ -4650,6 +4699,7 @@
     function selectMovieEpisode() {
         var episode = movieEpisodes[movieEpisodeIndex];
         if (!episode || !episode.id) return;
+        cancelMovieAutoAdvance();        // [build 234] người dùng chọn tập tay → huỷ tự chuyển tập
         movieCurrentEpisodeIndex = movieEpisodeIndex;
         movieEpisodeSwitchSerial += 1;   // [build 233] chọn tập mới từ picker → vô hiệu chuyển tập đang chờ
         closeMovieEpisodes();
@@ -5046,6 +5096,13 @@
         movieNativeHandoffActive = false;
         moviePreferNativePlayer = false;   // [build 233]
         try { window.__phimDebug && window.__phimDebug.log("[NATIVE] người dùng đóng player"); } catch (e) {}
+        // [build 234] ĐANG tự chuyển tập: trình phát native vừa đóng CHÍNH LÀ
+        // bước 1 của luồng tự chuyển tập (startMovieAutoAdvance gửi "stop") →
+        // KHÔNG mở lại màn hình chọn tập, để tập kế tiếp được nạp và phát.
+        if (movieAutoAdvanceActive) {
+            try { window.__phimDebug && window.__phimDebug.log("[NATIVE] player đóng trong lúc tự chuyển tập — giữ nguyên luồng"); } catch (e) {}
+            return;
+        }
         // Người dùng ĐÃ chủ động đóng trình phát native → KHÔNG tự phát lại
         // bằng <video>. Dọn UI player web kể cả khi cờ moviePlayerOpen lệch
         // (overlay còn class "show" / browser còn bị ẩn bởi "player-active").
@@ -5060,11 +5117,12 @@
     };
 
     // -----------------------------------------------------------------
-    // [BinTV iOS build 233] Native phát HẾT tập/phim (DidPlayToEndTime) →
-    // JS quyết định: phim BỘ còn tập → báo native GIỮ player (prepareNext)
-    // rồi tự chuyển tập; hết tập / phim LẺ → yêu cầu native đóng NGAY
-    // (stopMoviePlayback gửi action "stop") và quay về đúng giao diện.
-    // Swift có backstop tự đóng nếu JS im lặng — không bao giờ treo player.
+    // [BinTV iOS build 234 — 2026-09-15] Native phát HẾT tập/phim
+    // (DidPlayToEndTime) → JS quyết định: phim BỘ còn tập → ĐÓNG trình phát
+    // iOS rồi TỰ ĐỘNG phát tập tiếp theo (không dừng ở màn hình chọn tập);
+    // hết tập cuối / phim LẺ → đóng NGAY (stopMoviePlayback gửi action
+    // "stop") và quay về đúng giao diện. Swift có backstop tự đóng nếu JS
+    // im lặng — không bao giờ treo player.
     // -----------------------------------------------------------------
     window.__bintvNativePlaybackEnded = function (info) {
         if (isStaleNativeCallback(info)) return;
@@ -5072,17 +5130,13 @@
         // JVHD (live/quảng cáo) có luồng kết thúc riêng — đóng native theo
         // đúng nghiệp vụ JVHD (closeJvhdPlayback → stopMoviePlayback gửi stop).
         if (jvhdPlayerSession) { handleJvhdPlaybackCompleted(); return; }
-        var isSeries = !!(movieEpisodes && movieEpisodes.length > 0 && movieEpisodeType === "series");
-        if (isSeries && canPlayNextMovieEpisode() && !moviePlayerEpisodeSwitchInProgress) {
-            // Còn TẬP TIẾP THEO: báo native giữ player mở trong lúc nạp nguồn
-            // (backstop Swift nới lên 45s — kẹt mạng vẫn tự đóng, không treo).
-            try { if (typeof window.__bintvPrepareNextNativeEpisode === "function") window.__bintvPrepareNextNativeEpisode(); } catch (e) {}
-            if (playNextMovieEpisode("native-ended")) return;
-        }
+        // [build 234] PHIM BỘ còn tập → tự chuyển tập: startMovieAutoAdvance
+        // đóng trình phát iOS (action "stop") rồi nạp & phát tập kế.
+        if (startMovieAutoAdvance("native-ended")) return;
         // HẾT TẬP (phim bộ) hoặc PHIM LẺ: đóng trình phát ngay…
         stopMoviePlayback();   // (handoffActive còn true → gửi "stop" cho native)
         // …rồi quay về đúng giao diện: phim BỘ → CHỌN TẬP; phim LẺ → PHIM.
-        if (isSeries) reopenMovieEpisodePicker();
+        if (movieEpisodes && movieEpisodes.length > 0 && movieEpisodeType === "series") reopenMovieEpisodePicker();
     };
 
     // Thông báo cuối cùng khi MỌI đường đều thất bại. Trên iOS KHÔNG dùng
@@ -5351,6 +5405,14 @@
                 window.__phimDebug.log("loadMovieStreams: " + validStreams.length + " streams available, will fallback on error");
             }
             subtitleContext.stream = selected;
+            // [build 234] Ưu tiên TRÌNH PHÁT TÍCH HỢP: nếu trình phát iOS của
+            // phiên TRƯỚC còn đang phủ màn hình (mở phim/tập mới khi native
+            // chưa kịp đóng) thì đóng nó TRƯỚC — thẻ <video> nằm SAU
+            // AVPlayerViewController nên để native mở là không thấy hình.
+            if (movieNativeHandoffActive) {
+                movieNativeHandoffActive = false;
+                try { if (typeof window.__bintvStopVideoNative === "function") window.__bintvStopVideoNative(); } catch (e) {}
+            }
             startMoviePlayback(selected.url, title || selected.title || selected.name || "Phim", subtitleContext);
         }, function (error) {
             moviePlayerEpisodeSwitchInProgress = false;
@@ -6058,6 +6120,7 @@
     function selectMoviePlayerEpisode() {
         var episode = movieEpisodes[moviePlayerEpisodeIndex];
         if (!episode || !episode.id || moviePlayerEpisodeSwitchInProgress) return;
+        cancelMovieAutoAdvance();   // [build 234] chọn tập tay → huỷ luồng tự chuyển tập
         movieCurrentEpisodeIndex = moviePlayerEpisodeIndex;
         moviePlayerEpisodeSwitchInProgress = true;
         closeMoviePlayerEpisodeMenu();
@@ -6119,6 +6182,84 @@
         return true;
     }
 
+    // =================================================================
+    // [build 234 — 2026-09-15] TỰ CHUYỂN TẬP SAU KHI TRÌNH PHÁT ĐÓNG
+    //
+    //   hết tập (còn tập kế) → ĐÓNG trình phát → TỰ phát tập tiếp theo.
+    //
+    // Trình phát được đóng HẲN trước (native: action "stop" → AVPlayer đóng;
+    // web: overlay player gỡ khỏi màn hình) rồi mới nạp nguồn tập kế — đúng
+    // yêu cầu "phát xong một tập, trình phát tự đóng như hiện tại; sau khi
+    // đóng tự động phát tập tiếp theo, không dừng ở màn hình chọn tập".
+    // Nhờ vậy phiên phát mới luôn SẠCH (item/nguồn cũ đã được thu hồi hoàn
+    // toàn) và KHÔNG phụ thuộc player nào đang hiển thị.
+    //
+    // Trả về true khi luồng tự chuyển tập đã bắt đầu.
+    // =================================================================
+    function startMovieAutoAdvance(origin) {
+        if (movieAutoAdvanceActive) return false;
+        if (!canPlayNextMovieEpisode()) return false;
+        var nextIndex = movieCurrentEpisodeIndex + 1;
+        var next = movieEpisodes[nextIndex];
+        if (!next || !next.id) return false;
+
+        movieAutoAdvanceActive = true;
+        movieAutoAdvanceSerial += 1;
+        movieAutoAdvanceOrigin = String(origin || "auto");
+        var serial = movieAutoAdvanceSerial;
+
+        // Con trỏ tập trỏ NGAY sang tập kế (UI chọn tập, resume, Return… đều
+        // nhất quán với tập sắp phát).
+        moviePlayerEpisodeIndex = nextIndex;
+        movieEpisodeIndex = nextIndex;
+        movieCurrentEpisodeIndex = nextIndex;
+        closeMoviePlayerEpisodeMenu();
+
+        var subtitleContext = {
+            id: movieEpisodeMeta && movieEpisodeMeta.id ? movieEpisodeMeta.id : next.id,
+            videoId: next.id,
+            type: movieEpisodeType || "series",
+            name: movieEpisodeTitle || "Phim",
+            releaseInfo: movieEpisodeMeta && movieEpisodeMeta.releaseInfo,
+            imdb_id: movieEpisodeMeta && (movieEpisodeMeta.imdb_id || movieEpisodeMeta.imdbId),
+            season: next.season,
+            episode: next.episode
+        };
+        var title = (movieEpisodeTitle || "Phim") + " · "
+            + (next.title || ("Tập " + (next.episode || nextIndex + 1)));
+
+        try {
+            window.__phimDebug && window.__phimDebug.log("[PLAYER] tự chuyển tập tiếp theo ("
+                + movieAutoAdvanceOrigin + "): " + title);
+        } catch (e) {}
+
+        // (1) ĐÓNG TRÌNH PHÁT NGAY — không đợi nạp nguồn (nguồn có thể chậm).
+        stopMoviePlayback();
+        moviePlayerEpisodeSwitchInProgress = true;   // đang chuyển tập (khoá race)
+        // (2) Báo tiến trình cho người dùng thấy (player đã đóng → status nằm
+        //     trên thanh trạng thái của lưới PHIM).
+        showMovieStatus("Đang chuẩn bị tập tiếp theo…", false);
+        // (3) Nạp nguồn tập kế; guard = lần tự chuyển tập này còn hiệu lực?
+        //     (người dùng Return / chọn tập khác / rời màn hình PHIM → huỷ)
+        loadMovieStreams(movieEpisodeType || "series", next.id, title, subtitleContext,
+            function () { return isMovieAutoAdvanceValid(serial); });
+        return true;
+    }
+
+    function isMovieAutoAdvanceValid(serial) {
+        return movieAutoAdvanceActive && movieAutoAdvanceSerial === serial && movieBrowserOpen;
+    }
+
+    // Vô hiệu lần tự chuyển tập đang chờ (Return / chọn tập-phim khác / rời
+    // màn hình PHIM). Không đụng tới trình phát đang mở.
+    function cancelMovieAutoAdvance() {
+        if (!movieAutoAdvanceActive) return;
+        movieAutoAdvanceActive = false;
+        movieAutoAdvanceSerial += 1;
+        moviePlayerEpisodeSwitchInProgress = false;
+        try { window.__phimDebug && window.__phimDebug.log("[PLAYER] huỷ tự chuyển tập đang chờ"); } catch (e) {}
+    }
+
     // Mở lại overlay "Chọn tập" của PHIM BỘ sau khi trình phát đóng —
     // yêu cầu: đóng trình phát phim bộ → về giao diện CHỌN TẬP (không phải
     // lưới phim). Focus đặt ở tập vừa xem để chọn tiếp cho nhanh.
@@ -6140,15 +6281,13 @@
         if (jvhdPlayerSession) { handleJvhdPlaybackCompleted(); return; }
         if (movieTvPlaybackFallback) { handleMoviePlaybackError(); return; }
         try { window.__phimDebug && window.__phimDebug.log("[PLAYER] phát hết (" + (origin || "ended") + ")"); } catch (e) {}
-        if (movieEpisodes && movieEpisodes.length > 0 && movieEpisodeType === "series") {
-            // Phim BỘ: còn tập → tự chuyển; tập cuối → đóng + về CHỌN TẬP.
-            if (playNextMovieEpisode(origin || "ended")) return;
-            stopMoviePlayback();
-            reopenMovieEpisodePicker();
-            return;
-        }
-        // Phim LẺ: đóng trình phát → về giao diện PHIM (lưới phim).
+        // [build 234] PHIM BỘ còn tập: ĐÓNG TRÌNH PHÁT rồi TỰ ĐỘNG phát tập
+        // kế tiếp (không dừng ở màn hình chọn tập) — startMovieAutoAdvance.
+        if (startMovieAutoAdvance(origin || "ended")) return;
+        // Hết TẬP CUỐI (bộ) → đóng + về CHỌN TẬP.
+        // PHIM LẺ → đóng + về giao diện PHIM (lưới phim).
         stopMoviePlayback();
+        if (movieEpisodes && movieEpisodes.length > 0 && movieEpisodeType === "series") reopenMovieEpisodePicker();
     }
 
     // Hook cho test jsdom (tests/ios-native-handoff) kiểm tra luồng kết thúc
@@ -6167,6 +6306,7 @@
                 type: movieEpisodeType,
                 current: movieCurrentEpisodeIndex,
                 switchInProgress: moviePlayerEpisodeSwitchInProgress,
+                autoAdvance: movieAutoAdvanceActive,
                 preferNative: moviePreferNativePlayer,
                 handoffActive: movieNativeHandoffActive,
                 pickerOpen: movieEpisodeOpen,
@@ -6181,7 +6321,117 @@
         canNext: canPlayNextMovieEpisode,
         playNext: playNextMovieEpisode,
         reopenPicker: reopenMovieEpisodePicker,
-        completed: handleMoviePlaybackCompleted
+        completed: handleMoviePlaybackCompleted,
+        // [build 234] Seam cho test kiểm tra CHÍNH SÁCH ƯU TIÊN TRÌNH PHÁT:
+        //   startPlayback(...)  → phát bằng trình phát TÍCH HỢP (không handoff
+        //                          sớm, dù nguồn là MKV/AC3 — xem SUITE F);
+        //   playbackError()     → mô phỏng trình phát tích hợp thất bại → chỉ
+        //                          lúc này mới được fallback sang trình phát iOS.
+        startPlayback: function (url, title, context) { startMoviePlayback(url, title, context); },
+        playbackError: handleMoviePlaybackError,
+        autoAdvance: startMovieAutoAdvance,
+        pushUiState: function () { pushMovieIosUiState(true); }
+    };
+
+    // =================================================================
+    // [build 234 — 2026-09-15] CẦU NỐI GESTURE ĐIỀU HƯỚNG (Swift ↔ JS)
+    //
+    // Gesture điều hướng nằm ở SWIFT (window-level recognizer) nhưng phải
+    // hành xử theo NGỮ CẢNH của module PHIM:
+    //   • KHÔNG ở trong video player: vuốt từ cạnh trái = RETURN của chính
+    //     app PHIM (đóng menu con/phụ đề/chọn tập/player…) — nếu UI PHIM
+    //     đang ở màn hình gốc thì trả false để Swift lùi về màn hình trước.
+    //   • ĐANG ở trong video player: vuốt ngang cạnh trái/phải = TUA (giống
+    //     kéo thanh tiến trình); vuốt từ trên xuống = Return (đóng player,
+    //     quay về màn hình trước khi phát).
+    // Swift không thể chờ evaluateJavaScript cho mỗi cú vuốt → trạng thái
+    // được MIRROR về (chỉ gửi khi ĐỔI, kèm poll nhẹ 300ms phòng trường hợp
+    // UI đổi ở nhánh khác).
+    // =================================================================
+
+    // UI PHIM hiện có gì để Return không? (màn hình gốc → false)
+    function movieHasReturnTarget() {
+        if (moviePlayerOpen) return true;
+        if (movieEpisodeOpen) return true;
+        if (movieSearchResultsActive) return true;
+        if (movieFilterMenuOpen || movieSearchOpen) return true;
+        if (movieSubtitleMenuOpen || moviePlayerEpisodeMenuOpen) return true;
+        if (jvhdQualitySelectorOpen) return true;
+        if (jvhdPlayerSession) return true;
+        return false;
+    }
+
+    function pushMovieIosUiState(force) {
+        try {
+            var handler = window.webkit && window.webkit.messageHandlers
+                && window.webkit.messageHandlers.phimBridge;
+            if (!handler) return;
+            var canReturn = movieHasReturnTarget();
+            var playerOpen = !!moviePlayerOpen;
+            // Vị trí/thời lượng để Swift TUA bằng gesture ngang: gốc tính đích
+            // tua tuyệt đối, giống hệt lúc người dùng kéo thanh tiến trình.
+            var positionMs = 0;
+            var durationMs = 0;
+            if (playerOpen) {
+                var bounds = getMovieSeekBounds();
+                if (bounds) {
+                    if (isFinite(bounds.current) && bounds.current > 0) positionMs = Math.round(bounds.current);
+                    if (isFinite(bounds.duration) && bounds.duration > 0) durationMs = Math.round(bounds.duration);
+                }
+            }
+            // Chữ ký gồm cả vị trí (giây) khi player mở → mirror tự cập nhật
+            // ~1 lần/giây lúc đang phát + NGAY khi UI đổi; lúc duyệt phim chỉ
+            // gửi khi trạng thái đổi → gần như không tốn gì.
+            var signature = (canReturn ? "1" : "0") + (playerOpen ? "1" : "0")
+                + (moviePlayerPaused ? "1" : "0")
+                + (playerOpen ? ":" + Math.round(positionMs / 1000) : "");
+            if (!force && signature === movieIosUiStateLastSignature) return;
+            movieIosUiStateLastSignature = signature;
+            handler.postMessage({
+                action: "uiState",
+                canReturn: canReturn,
+                playerOpen: playerOpen,
+                playerPaused: !!moviePlayerPaused,
+                positionMs: positionMs,
+                durationMs: durationMs
+            });
+        } catch (e) {}
+    }
+    // Poll nhẹ: trạng thái UI PHIM đổi ở rất nhiều nhánh (menu, chọn tập,
+    // player, filter…) — mirror chỉ gửi khi CÓ THAY ĐỔI nên chi phí ~0.
+    setInterval(function () { pushMovieIosUiState(false); }, 300);
+
+    // RETURN của chính UI PHIM — Swift gọi khi người dùng vuốt cạnh trái.
+    // Trả về true nếu đã xử lý (đóng player/menu/chọn tập…), false nếu đang ở
+    // màn hình gốc (Swift lùi về màn hình trước đó).
+    window.__bintvPhimReturn = function () {
+        cancelMovieAutoAdvance();
+        var handled = false;
+        try { handled = !!handleMovieBackAction(); } catch (e) { handled = false; }
+        pushMovieIosUiState(true);
+        return handled;
+    };
+
+    // ---- TUA BẰNG GESTURE (kéo ngang ở cạnh màn hình trong player) ----
+    // Swift gửi vị trí TUYỆT ĐỐI (giây) tính từ vị trí lúc bắt đầu vuốt →
+    // không bị trôi (drift) dù seek trước đó chưa hoàn tất.
+    window.__bintvPlayerBeginSeek = function () {
+        if (!moviePlayerOpen) return null;
+        var bounds = getMovieSeekBounds();
+        if (!bounds) return null;
+        var duration = (isFinite(bounds.duration) && bounds.duration > 0) ? bounds.duration / 1000 : 0;
+        return { position: Math.max(0, bounds.current / 1000), duration: duration };
+    };
+    window.__bintvPlayerSeekTo = function (seconds) {
+        if (!moviePlayerOpen) return false;
+        var value = Number(seconds);
+        if (!isFinite(value) || value < 0) return false;
+        performMovieScrubSeek(value * 1000);
+        return true;
+    };
+    window.__bintvPlayerEndSeek = function () {
+        scheduleMovieSeekTimelineHide(450);
+        return true;
     };
 
     function updateMoviePlayerStatus(message) {
@@ -6273,6 +6523,10 @@
         movieNativeHandoffActive = false;
         ensureMovieExperienceUI();
         moviePlayerOpen = true;
+        // [build 234] Trình phát TÍCH HỢP đang là player hiển thị → mirror
+        // trạng thái về Swift NGAY (gesture: vuốt ngang cạnh = tua, vuốt từ
+        // trên xuống = Return/đóng player).
+        pushMovieIosUiState(true);
         moviePlayerPaused = false;
         moviePlayerUsingAVPlay = false;
         cancelMovieScrubInteraction(true);
@@ -6325,20 +6579,28 @@
         //  Trên Android/Tizen/Windows cả 2 hàm đều trả false → không đổi gì.
         // =================================================================
         rememberMovieStreamSource(url, title, subtitleContext && subtitleContext.stream);
-        // [build 233] Native (AVPlayerViewController) ĐANG là player hiển thị
-        // → mọi lần phát kế tiếp của phiên này (tự chuyển tập / đổi tập trong
-        // menu / nguồn dự phòng) TIẾP TỤC đi qua native, kể cả nguồn HLS vốn
-        // phát được bằng <video>: thẻ <video> nằm SAU lớp native nên nếu nó
-        // nhận phát thì người dùng chỉ nghe tiếng, không thấy hình.
-        var needNativeNow = iosNeedsNativePlayerFor(url, subtitleContext && subtitleContext.stream);
-        if (moviePreferNativePlayer || needNativeNow) {
-            var handoffReason = moviePreferNativePlayer && !needNativeNow
-                ? "continue-native-session" : "unsupported-source";
-            try {
-                window.__phimDebug && window.__phimDebug.log("[NATIVE] pre-flight handoff (" + handoffReason + "):", String(url).substring(0, 140));
-            } catch (e) {}
-            if (requestNativeMoviePlayback(handoffReason, url)) return;
-        }
+        // =================================================================
+        // [build 234 — 2026-09-15] ƯU TIÊN TRÌNH PHÁT TÍCH HỢP (xem khối
+        // chính sách MOVIE_INTEGRATED_PLAYER_FIRST ở đầu file).
+        //
+        // KHÔNG pre-flight handoff nữa: dù nguồn là MKV/AVI/AC3… (thứ WebKit
+        // thường không giải mã được) thì vẫn để TRÌNH PHÁT TÍCH HỢP thử trước.
+        // Chỉ khi nó THẬT SỰ không phát được (video.onerror / hết nguồn dự
+        // phòng) mới đi các nhánh fallback sang trình phát iOS:
+        //   • phim_ios_fallback.js: proxy fail → direct fail → native;
+        //   • handleMoviePlaybackError(): hết mọi nguồn web → native.
+        // `iosNeedsNativePlayerFor` chỉ còn dùng để LOG chẩn đoán (biết trước
+        // nguồn nào có khả năng phải fallback) — không quyết định phát.
+        // =================================================================
+        var nativePlaybackHint = iosNeedsNativePlayerFor(url, subtitleContext && subtitleContext.stream);
+        try {
+            window.__phimDebug && window.__phimDebug.log(
+                "[PLAYER] ưu tiên trình phát tích hợp (thẻ <video>)"
+                + (nativePlaybackHint ? " — nguồn có dấu hiệu WebKit không giải mã được, sẽ fallback nếu lỗi" : "")
+                + ":", String(url).substring(0, 140));
+        } catch (e) {}
+        // Tập kế đã có nguồn → lần tự chuyển tập (build 234) hoàn tất.
+        movieAutoAdvanceActive = false;
 
         // [BinTV iOS build 231] VÔ HIỆU HOÁ nhánh TV/EXTERNAL PLAYER (Tizen
         // webapis.avplay — "phát trên TV") khi chạy trong WKWebView iOS:
@@ -6485,6 +6747,15 @@
                     if (errInfo && errInfo.error && errInfo.error.code === 4) {
                         if (window.__phimDebug) window.__phimDebug.warn("Stream URL tra ve content khong phai video. Co the key/hash da het han (sc.k-20.xyz), hoac URL khong hop le.");
                     }
+                    // [build 234] BỎ QUA lỗi "ma" đến muộn của nguồn CŨ sau khi
+                    // trình phát đã đóng (stopMoviePlayback gỡ src → load(),
+                    // hoặc đang giữa lúc tự chuyển tập). Nếu không chặn, lỗi
+                    // này sẽ kéo luồng sang TRÌNH PHÁT iOS dù người dùng không
+                    // hề yêu cầu — trái chính sách ưu tiên trình phát tích hợp.
+                    if (!moviePlayerOpen) {
+                        try { window.__phimDebug && window.__phimDebug.log("[PLAYER] bỏ qua htmlVideo.onerror khi trình phát đã đóng"); } catch (e) {}
+                        return;
+                    }
                     handleMoviePlaybackError();
                 };
                 try { window.__phimDebug && window.__phimDebug.log("[PLAYER] play() called"); } catch (e) {}
@@ -6501,6 +6772,10 @@
                     }
                     try { window.__phimDebug && window.__phimDebug.error("htmlVideo.play() rejected", errName, playErr && playErr.message); } catch (e) {}
                     try { phimLog("startMoviePlayback: play() rejected", { name: errName, msg: playErr && playErr.message }); } catch (e) {}
+                    // [build 234] Trình phát đã đóng (người dùng Return / đang
+                    // tự chuyển tập) → lời hứa play() cũ bị từ chối không còn
+                    // nghĩa: KHÔNG được kéo sang trình phát iOS.
+                    if (!moviePlayerOpen) return;
                     handleMoviePlaybackError();
                 });
             }
@@ -6557,6 +6832,7 @@
             if (browser) browser.classList.remove("player-active");
             moviePlayerOpen = false;
             moviePlayerEpisodeSwitchInProgress = false;
+            pushMovieIosUiState(true);   // [build 234] gesture: player đã đóng NGAY
             updateMovieBrowserFocus();
             if (movieMergedRefreshPending) {
                 movieMergedRefreshPending = false;
@@ -6711,6 +6987,9 @@
     }
 
     function handleMovieBackAction() {
+        // [build 234] Return của người dùng = ý chí chủ động → huỷ lần tự
+        // chuyển tập đang chờ (không tự bật lại sau khi người dùng đã Return).
+        cancelMovieAutoAdvance();
         if (jvhdQualitySelectorOpen) { closeJvhdQualitySelector(true); return true; }
         if (jvhdPlayerSession && moviePlayerOpen) { closeJvhdPlayback(true); return true; }
         if (movieBrowserOpen || moviePlayerOpen || movieSubtitleMenuOpen || moviePlayerEpisodeMenuOpen || movieSearchOpen || movieFilterMenuOpen) cancelMovieScrubInteraction(true);

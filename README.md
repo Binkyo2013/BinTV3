@@ -1,11 +1,13 @@
 # BinTV iOS — TrollStore Build (FIXED)
 
-> **Bản mới nhất: 2.5.2 (build 233)** — Phim BỘ hết tập TỰ chuyển tập
-> tiếp theo · đóng trình phát phim bộ quay về CHỌN TẬP · phim lẻ hết/đóng
-> quay về giao diện PHIM · trình phát không bao giờ bị "treo" (backstop tự
-> đóng). Chi tiết: mục `### Build 233 (2.5.2)` ở cuối file · Cách lấy file:
-> artifact `BinTV-trollstore-unsigned` (chứa `BinTV.ipa`) của workflow
-> "Build unsigned IPA (TrollStore)".
+> **Bản mới nhất: 2.5.3 (build 234)** — Phim BỘ hết tập: trình phát tự đóng
+> rồi **TỰ ĐỘNG phát tập tiếp theo** (không dừng ở màn hình chọn tập) ·
+> **ưu tiên 1 = trình phát TÍCH HỢP** của app (trình phát iOS chỉ dùng khi
+> trình phát tích hợp không phát được) · gesture điều hướng: vuốt cạnh trái
+> = RETURN, trong trình phát vuốt ngang cạnh = TUA, vuốt từ trên xuống =
+> đóng trình phát. Chi tiết: mục `### Build 234 (2.5.3)` ở cuối file · Cách
+> lấy file: artifact `BinTV-trollstore-unsigned` (chứa `BinTV.ipa`) của
+> workflow "Build unsigned IPA (TrollStore)".
 
 ## Build by GitHub Actions
 
@@ -446,6 +448,91 @@ AC3/EAC3) nhưng **vẫn không mở được Matroska** — nếu addon CHỈ c
 native cũng báo lỗi thật và app.js thử nguồn kế tiếp; đường đúng cho trường hợp đó là
 addon trả HLS/MP4 (hoặc debrid). Phụ đề (Vietsub/OpenSubtitles) đã được xử lý ở build
 232 — xem `### Build 232 (2.5.2)`.
+
+### Build 234 (2.5.3) — Phim bộ tự đóng rồi phát tập kế · ưu tiên trình phát tích hợp · gesture điều hướng trong trình phát
+
+**Vấn đề (ROOT CAUSE) của bản 2.5.2:**
+
+1. **Phim bộ dừng ở màn hình chọn tập.** Build 233 chỉ *chuyển tập trên cùng
+   trình phát đang mở* (`playNextMovieEpisode`). Khi trình phát đóng trước khi
+   tập kế tiếp kịp nạp (nguồn chậm, backstop 10s của Swift, hoặc native đóng),
+   luồng bị dừng và UI rơi về màn hình CHỌN TẬP — đúng triệu chứng "hết tập là
+   đứng ở danh sách tập".
+2. **Trình phát iOS mở NGAY TỪ ĐẦU.** `startMoviePlayback` có **pre-flight
+   handoff**: chỉ cần `iosNeedsNativePlayerFor()` báo nguồn là MKV/AVI/AC3… hoặc
+   cờ latching `moviePreferNativePlayer` còn bật (native từng phát thành công
+   trong phiên) là `requestNativeMoviePlayback()` chạy **trước khi** thẻ `<video>`
+   được thử → phần lớn nguồn Stremio mở AVPlayerViewController ngay, mất HUD/phụ
+   đề/chọn tập của app. Trái yêu cầu "ưu tiên trình phát tích hợp".
+3. **Không có Return/tua bằng gesture trong trình phát.** PHIM là SPA nên
+   `webView.canGoBack` luôn `false` → vuốt cạnh trái không làm gì; trong trình
+   phát lại càng không có gesture tua/đóng.
+
+**Hành vi mới (tab PHIM — không đụng LIVE TV / TUBE / SETTING):**
+
+1. **Phim BỘ hết tập:** trình phát **TỰ ĐÓNG** (native nhận action `stop`,
+   web gỡ overlay) → nạp nguồn tập kế → **TỰ ĐỘNG mở lại trình phát và phát tập
+   tiếp theo**. Không dừng ở màn hình chọn tập. Hết **tập cuối** → đóng + về
+   CHỌN TẬP (như cũ). **Phim LẺ** giữ nguyên: hết/đóng → về lưới PHIM.
+2. **Ưu tiên trình phát:** mọi lần phát đều bắt đầu bằng **trình phát TÍCH HỢP**
+   (thẻ `<video>` của app). Chỉ khi nó **không phát được** — `video.onerror` cả
+   proxy lẫn direct (`phim_ios_fallback.js`), hết mọi nguồn web dự phòng
+   (`handleMoviePlaybackError`) — mới handoff sang **trình phát iOS**
+   (`AVPlayerViewController`). Lỗi "ma" đến muộn sau khi trình phát đã đóng bị
+   chặn (không còn mở iOS ngoài ý muốn).
+3. **Gesture điều hướng (ngữ cảnh trình phát):**
+   - **Không ở trong trình phát:** vuốt từ **cạnh trái** = **RETURN** về màn hình
+     trước (Return của chính PHIM → tab trước; recognizer tự phát hiện mép, KHÔNG
+     dùng gesture Back mặc định của iOS). Vuốt cạnh phải = mở menu tab (như cũ).
+   - **Đang ở trong trình phát:** vuốt **NGANG** từ cạnh trái/phải = **TUA**
+     (tương đương giữ & kéo thanh tiến trình; ~1/3 thời lượng cho hết chiều ngang,
+     kẹp 120–600s, throttle 12 lệnh/giây) — **không** Return. Vuốt từ **TRÊN
+     xuống** = **RETURN**: đóng trình phát, quay về màn hình trước khi phát.
+   - Gesture không xung đột: recognizer mới chỉ được **nhận touch khi có trình
+     phát đang mở**; long-press mở menu bị chặn khi trình phát iOS đang phủ.
+
+**Cách làm (file nào sửa gì):**
+
+- `BinTV/Phim/Web/assets/app.js`
+  - Bỏ hẳn pre-flight handoff trong `startMoviePlayback` (giữ
+    `iosNeedsNativePlayerFor` làm chẩn đoán/log); thêm khối chính sách
+    `MOVIE_INTEGRATED_PLAYER_FIRST`.
+  - `startMovieAutoAdvance()` / `isMovieAutoAdvanceValid(serial)` /
+    `cancelMovieAutoAdvance()`: hết tập → đóng trình phát → nạp nguồn tập kế
+    (guard serial chống race) → `startMoviePlayback` mở lại. Dùng chung cho cả
+    đường `<video>` (`handleMoviePlaybackCompleted`) và đường native
+    (`__bintvNativePlaybackEnded`). Mọi thao tác người dùng (Return, chọn
+    tập/phim khác, rời màn hình PHIM) huỷ luồng đang chờ.
+  - `__bintvNativePlaybackClosed` không mở lại màn hình chọn tập khi luồng tự
+    chuyển tập đang chạy; `onerror`/`play().catch` bỏ qua lỗi khi trình phát đã đóng.
+  - Cầu nối gesture: `__bintvPhimReturn()`, `__bintvPlayerBeginSeek()`,
+    `__bintvPlayerSeekTo(giây)`, `__bintvPlayerEndSeek()`, `movieHasReturnTarget()`
+    + mirror `uiState` (`canReturn`, `playerOpen`, `positionMs`, `durationMs`)
+    qua message `phimBridge` (gửi khi đổi, ~1 giây/lần khi đang phát).
+- `BinTV/Views/ContentView.swift` — `BinTVPlayerGestureHub` +
+  `BinTVPlayerGestureContext` (sổ đăng ký trình phát đang mở);
+  `BinTVEdgeSwipeRecognizer` thêm cạnh `.top` + phiên TUA (`SeekSession`) +
+  `applySeek` (đích tua tuyệt đối, throttle); recognizer `.top` chỉ nhận khi có
+  trình phát; long-press bị chặn khi trình phát iOS đang phủ.
+- `BinTV/Phim/PhimWebView.swift` — mirror `uiState` từ web app; đăng ký ngữ cảnh
+  trình phát cho gesture; `registerBackHandler` nay gọi **Return của web app**
+  (`__bintvPhimReturn`) thay vì `goBack()` của WebKit (SPA không có history);
+  `setTabActive()` để trình phát ẩn của tab khác không nhận gesture.
+- `BinTV/Player/PhimNativePlayerController.swift` — đăng ký ngữ cảnh trình phát
+  iOS (vị trí/thời lượng đọc trực tiếp từ `AVPlayer`); `closeByUserGesture()`
+  (vuốt trên-xuống = Done: đóng + báo JS quay về màn hình trước); `seekTo` giữ
+  nguyên trạng thái phát/tạm dừng.
+- `BinTV/Phim/Web/assets/phim_ios_fallback.js` — chặn lỗi muộn khi nguồn rỗng/
+  trình phát đã đóng (không leo thang sang trình phát iOS ngoài ý muốn).
+- `tests/ios-native-handoff/run.js` — SUITE E cập nhật theo luồng mới (E1/E7/E9)
+  + **SUITE F mới** (ưu tiên trình phát, Return, tua, mirror uiState, lỗi muộn,
+  wiring Swift): **174/174 PASS**.
+- `BinTV/Info.plist` + `BinTV.xcodeproj/project.pbxproj` — build 234 / 2.5.3.
+
+**Giới hạn nói rõ:** AVFoundation vẫn không mở Matroska — nếu addon CHỈ có `.mkv`
+progressive thì trình phát tích hợp lỗi (1 lần thử proxy + 1 lần direct) rồi
+handoff sang trình phát iOS; nếu cả hai đều lỗi thì app.js thử nguồn kế tiếp của
+addon và cuối cùng mới báo lỗi thật (không bao giờ "giả vờ đang phát").
 
 ### Build 233 (2.5.2) — Phim bộ tự chuyển tập · đóng/hết phim quay về đúng giao diện · chống treo trình phát
 

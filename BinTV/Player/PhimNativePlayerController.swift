@@ -50,10 +50,20 @@ import UIKit
 // nhiều ứng viên / không tự present). Giữ 2 file độc lập để KHÔNG đụng
 // vào hành vi LIVE TV đang chạy tốt.
 //
-// [build 233 — 2026-09-14] LUỒNG KẾT THÚC PHÁT (yêu cầu mới):
-//   * Phim BỘ: tập phát hết → JS tự nạp tập tiếp theo (play() mới thay
-//     item trên CÙNG player đang mở); người dùng đóng player → JS quay
-//     về giao diện CHỌN TẬP.
+// [build 234 — 2026-09-15] ƯU TIÊN TRÌNH PHÁT (thay đổi quan trọng):
+//   * Trình phát TÍCH HỢP của app (thẻ <video> trong web app PHIM) LUÔN
+//     được thử TRƯỚC. Controller này chỉ được gọi khi trình phát tích hợp
+//     KHÔNG THỂ phát (không nguồn tương thích / không mở được video / hết
+//     nguồn dự phòng) — bỏ hẳn pre-flight handoff của build 231–233.
+//   * Gesture điều hướng trong trình phát iOS: vuốt NGANG ở cạnh trái/phải
+//     = TUA (như kéo thanh tiến trình, KHÔNG Return); vuốt từ TRÊN xuống =
+//     RETURN (đóng trình phát, web app quay về màn hình trước khi phát) —
+//     xem `registerGestureContext()` + `closeByUserGesture()`.
+//
+// [build 233 — 2026-09-14] LUỒNG KẾT THÚC PHÁT:
+//   * Phim BỘ: tập phát hết → trình phát ĐÓNG rồi JS tự động nạp & phát tập
+//     tiếp theo (build 234: tập kế phát bằng trình phát tích hợp); người
+//     dùng đóng player → JS quay về giao diện CHỌN TẬP.
 //   * Phim LẺ: phát hết hoặc đóng → JS quay về giao diện PHIM (lưới phim).
 //   * CHỐNG TREO: observer DidPlayToEndTime bắn onEnded cho JS; JS có
 //     endedGraceTimeout (10s, hoặc 45s khi đã báo prepareNext) để trả lời
@@ -176,6 +186,94 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
 
     /// Player native đang hiện trên màn hình?
     var isPresented: Bool { playerController != nil }
+
+    // =================================================================
+    // [build 234 — 2026-09-15] GESTURE ĐIỀU HƯỚNG TRONG TRÌNH PHÁT iOS
+    //
+    // Gesture (vuốt ngang cạnh = TUA, vuốt từ trên xuống = RETURN/đóng) nằm
+    // ở `BinTVWindowGestures` trên UIWindow (xem ContentView.swift) và đọc
+    // "ngữ cảnh trình phát" đăng ký ở đây:
+    //   • isActive → AVPlayerViewController đang được present;
+    //   • position/duration → đọc TRỰC TIẾP từ AVPlayer (đồng bộ, không cần
+    //     chờ callback);
+    //   • seekTo → seek như kéo thanh tiến trình, GIỮ NGUYÊN trạng thái
+    //     phát/tạm dừng;
+    //   • close → RETURN: đóng player + báo JS (onClosed) để web app quay về
+    //     màn hình trước khi phát (giống hệt bấm Done).
+    // Không đụng gì tới LIVE TV (AVPlayerManager) — chỉ trình phát của PHIM.
+    // =================================================================
+    override init() {
+        super.init()
+        registerGestureContext()
+    }
+
+    private func registerGestureContext() {
+        BinTVPlayerGestureHub.shared.register(BinTVPlayerGestureContext(
+            name: "ios-native-player",
+            isNative: true,
+            isActive: { [weak self] in self?.isPresented ?? false },
+            position: { [weak self] in
+                guard let time = self?.player?.currentTime(), time.isNumeric else { return 0 }
+                return max(0, time.seconds)
+            },
+            duration: { [weak self] in
+                guard let duration = self?.player?.currentItem?.duration,
+                      duration.isNumeric, duration.seconds > 0 else { return 0 }
+                return duration.seconds
+            },
+            beginSeek: { [weak self] in
+                // AVKit tự hiện thanh điều khiển khi chạm; chỉ cần log + rung
+                // nhẹ để người dùng biết đã vào chế độ TUA (không Return).
+                PhimDebugLog.step("GESTURE", "nativeSeek", "begin",
+                                  "session=\(self?.request?.session ?? "-")")
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            },
+            seekTo: { [weak self] seconds in
+                guard let self = self,
+                      let player = self.player,
+                      player.currentItem != nil else { return }
+                let target = max(0, seconds)
+                let wasPlaying = player.rate > 0
+                let time = CMTime(seconds: target, preferredTimescale: 600)
+                player.seek(to: time,
+                            toleranceBefore: CMTime(seconds: 0.25, preferredTimescale: 600),
+                            toleranceAfter: CMTime(seconds: 0.25, preferredTimescale: 600)) { _ in
+                    // Chỉ tự phát lại nếu TRƯỚC ĐÓ đang phát (người dùng đang
+                    // tạm dừng thì tua xong vẫn tạm dừng).
+                    guard wasPlaying, !self.waitingForNextInstruction else { return }
+                    player.play()
+                }
+                self.lifecycleResumePosition = time
+                PhimDebugLog.step("GESTURE", "nativeSeek", "go",
+                                  "target=\(Int(target.rounded()))s wasPlaying=\(wasPlaying)")
+            },
+            endSeek: { [weak self] in
+                PhimDebugLog.step("GESTURE", "nativeSeek", "end",
+                                  "session=\(self?.request?.session ?? "-")")
+            },
+            close: { [weak self] in
+                self?.closeByUserGesture()
+            }))
+    }
+
+    /// [build 234] RETURN bằng gesture: người dùng vuốt từ TRÊN xuống trong
+    /// trình phát iOS → ĐÓNG player và báo JS (`onClosed`) để web app quay về
+    /// màn hình trước khi phát. Tương đương bấm nút Done của AVKit (cùng một
+    /// đường callback, không sinh 2 lần thông báo).
+    func closeByUserGesture() {
+        guard isPresented || player != nil else { return }
+        PhimDebugLog.step("GESTURE", "nativeClose", "go",
+                          "reason=swipe-down session=\(request?.session ?? "-")")
+        let closed = request
+        teardownCurrentItem()
+        request = nil
+        dismissingByFailure = true      // chặn delegate bắn onClosed lần thứ hai
+        dismissPlayerController { [weak self] in
+            guard let self = self else { return }
+            self.dismissingByFailure = false
+            if let closed = closed { self.onClosed?(closed) }
+        }
+    }
 
     // =================================================================
     // PUBLIC API — PhimWebView gọi từ userContentController(_:didReceive:)
@@ -496,9 +594,10 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
     // Giao thức với app.js:
     //   1. Item phát hết → bắn onEnded → JS nhận __bintvNativePlaybackEnded.
     //   2. JS quyết định trong endedGraceTimeout (10s):
-    //        • Phim bộ còn tập: JS gọi action "prepareNext" NGAY (giữ player
-    //          mở, backstop nới lên 45s) rồi nạp stream tập kế → gửi play()
-    //          mới → loadCandidate thay item TRÊN CÙNG player đang hiện.
+    //        • Phim bộ còn tập (build 234): JS gọi stop() để ĐÓNG trình phát
+    //          rồi tự động nạp & phát tập kế tiếp — không dừng ở màn hình
+    //          chọn tập (action "prepareNext" + prepareNextTimeout 45s vẫn
+    //          được giữ như API dự phòng cho luồng "giữ player mở").
     //        • Hết tập / phim lẻ: JS gọi stop() → player đóng ngay, UI quay
     //          về giao diện chọn tập (phim bộ) hoặc lưới PHIM (phim lẻ).
     //   3. JS im lặng (WebView chết / kẹt mạng) → backstop TỰ ĐÓNG player và

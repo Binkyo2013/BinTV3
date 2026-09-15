@@ -101,6 +101,25 @@
                 var src = String(video.currentSrc || video.src || "");
                 log("error", { code: err && err.code, msg: err && err.message, src: src.substring(0, 200) });
 
+                // [build 234] LỖI "MA" ĐẾN MUỘN — không phải lỗi của nguồn:
+                //   • src rỗng: stopMoviePlayback vừa gỡ nguồn (hết tập → tự
+                //     chuyển tập / người dùng Return);
+                //   • trình phát đã đóng: UI player không còn hiển thị.
+                // Trước đây 2 trường hợp này có thể leo thang sang trình phát
+                // iOS (mở AVPlayer ngoài ý muốn) → chặn tại đây.
+                if (!src) return;
+                var playerStillOpen = true;
+                try {
+                    var hooks = window.__bintvMoviePlaybackHooks;
+                    if (hooks && typeof hooks.getState === "function") {
+                        playerStillOpen = !!hooks.getState().playerOpen;
+                    }
+                } catch (stateError) {}
+                if (!playerStillOpen) {
+                    log("player đã đóng → bỏ qua lỗi muộn (không retry/handoff)");
+                    return;
+                }
+
                 // Đã retry src này (trước đó) → không lặp lại.
                 if (video.__iosFallbackTriedFor === src) {
                     // =====================================================

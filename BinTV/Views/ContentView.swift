@@ -71,6 +71,31 @@ import WebKit
 //   landscape: GIỮ NGUYÊN VĂN.
 // • Duy nhất một thứ bị thay thế: `TabView` → `ZStack` (mục B.1) — đúng
 //   là đối tượng của yêu cầu "tự động ẩn menu bar".
+//
+// -------------------------------------------------------------------
+// E. [build 234 — 2026-09-15] GESTURE ĐIỀU HƯỚNG THEO NGỮ CẢNH TRÌNH PHÁT
+// -------------------------------------------------------------------
+// Yêu cầu:
+//   • KHÔNG ở trong video player: vuốt từ cạnh trái vào màn hình = RETURN
+//     về màn hình trước đó (Return của CHÍNH app BinTV/PHIM — KHÔNG dùng
+//     gesture Back mặc định của iOS, vẫn là recognizer tự phát hiện vùng mép
+//     như trước).
+//   • ĐANG ở trong video player:
+//       - vuốt NGANG từ cạnh trái/phải = TUA video (tương đương giữ & kéo
+//         thanh tiến trình), KHÔNG Return;
+//       - vuốt từ TRÊN xuống = RETURN: đóng player, quay về màn hình trước
+//         khi phát video.
+// Cách làm (không đổi kiến trúc gesture cũ):
+//   1. `BinTVPlayerGestureHub`: trình phát nào đang mở thì đăng ký "ngữ
+//      cảnh" (`BinTVPlayerGestureContext`) gồm: đang mở?, bắt đầu tua, tua
+//      tới giây N, kết thúc tua, đóng (Return).
+//      - Trình phát TÍCH HỢP của PHIM (web `<video>`) → PhimWebView.swift.
+//      - Trình phát iOS (AVPlayerViewController) → PhimNativePlayerController.
+//   2. Coordinator của `BinTVWindowGestures` đọc hub:
+//      - có ngữ cảnh → vuốt ngang cạnh = TUA, vuốt trên-xuống = đóng player;
+//      - không có ngữ cảnh → hành vi cũ (cạnh trái = Return, cạnh phải = menu).
+//   3. Recongnizer `.top` CHỈ nhận touch khi có trình phát đang mở → LIVE TV,
+//      TUBE, SETTING hoàn toàn không bị ảnh hưởng.
 // =====================================================================
 
 struct ContentView: View {
@@ -145,7 +170,13 @@ struct ContentView: View {
             BinTVWindowGestures(onLongPress: { toggleOverlayMenu() },
                                 onEdgeRight: { toggleOverlayMenu() },
                                 onEdgeLeft: { handleBackGesture() },
-                                longPressAllowed: { !showMenu && !showingPlayer })
+                                longPressAllowed: {
+                                    // [build 234] Trình phát iOS (AVPlayerViewController)
+                                    // phủ toàn màn hình → long-press mở menu tab
+                                    // KHÔNG có nghĩa (menu nằm sau lớp phủ).
+                                    !showMenu && !showingPlayer
+                                        && !BinTVPlayerGestureHub.shared.isNativePlayerActive
+                                })
                 .frame(width: 0, height: 0)
         )
         .onAppear {
@@ -310,6 +341,74 @@ final class BinTVBackRegistry {
     }
 }
 
+// MARK: - [build 234] Ngữ cảnh trình phát cho gesture điều hướng
+
+/// Một trình phát ĐANG MỞ của module PHIM đăng ký "ngữ cảnh" này để gesture
+/// điều hướng biết phải làm gì:
+///   • vuốt NGANG ở cạnh trái/phải = TUA (tương đương giữ & kéo thanh tiến
+///     trình) — KHÔNG Return;
+///   • vuốt từ TRÊN xuống = RETURN (đóng player, quay về màn hình trước khi
+///     phát video).
+/// Hai trình phát đăng ký: trình phát TÍCH HỢP của PHIM (`PhimWebView.swift`)
+/// và trình phát iOS (`PhimNativePlayerController.swift`). Không có trình
+/// phát nào mở → gesture giữ nguyên hành vi cũ (Return / menu tab).
+struct BinTVPlayerGestureContext {
+    /// Tên ngắn để log/chẩn đoán ("phim-web-player" / "ios-native-player").
+    let name: String
+    /// Trình phát iOS (AVPlayerViewController) — lớp phủ TOÀN MÀN HÌNH.
+    let isNative: Bool
+    /// Trình phát này đang mở?
+    let isActive: () -> Bool
+    /// Vị trí phát hiện tại (giây). Với trình phát TÍCH HỢP (web `<video>`),
+    /// giá trị này được mirror về Swift qua message "uiState" của app.js —
+    /// gesture trên UIWindow phải quyết định TUA hay RETURN ngay lập tức,
+    /// không thể chờ `evaluateJavaScript` (bất đồng bộ).
+    let position: () -> Double
+    /// Thời lượng video (giây); 0 = chưa biết (tua theo tốc độ mặc định).
+    let duration: () -> Double
+    /// Bắt đầu thao tác tua (hiện thanh tiến trình như khi kéo seek bar).
+    let beginSeek: () -> Void
+    /// Tua TUYỆT ĐỐI tới giây thứ N (đang trong phiên tua).
+    let seekTo: (Double) -> Void
+    /// Kết thúc phiên tua (ẩn thanh tiến trình).
+    let endSeek: () -> Void
+    /// RETURN: đóng trình phát, quay về màn hình trước khi phát.
+    let close: () -> Void
+}
+
+/// Sổ đăng ký ngữ cảnh trình phát. Gesture trên UIWindow đọc để quyết định
+/// "cú vuốt này là TUA hay RETURN" — câu trả lời phải có NGAY (không thể chờ
+/// evaluateJavaScript), nên trạng thái mở/đóng của từng trình phát được mirror
+/// về Swift bằng message "phimBridge" action "uiState" (xem app.js).
+final class BinTVPlayerGestureHub {
+    static let shared = BinTVPlayerGestureHub()
+    private var contexts: [BinTVPlayerGestureContext] = []
+    private let lock = NSLock()
+
+    /// Đăng ký (ghi đè theo tên — idempotent khi controller init lại).
+    func register(_ context: BinTVPlayerGestureContext) {
+        lock.lock(); defer { lock.unlock() }
+        contexts.removeAll { $0.name == context.name }
+        contexts.append(context)
+    }
+
+    /// Ngữ cảnh đang hoạt động — ưu tiên trình phát iOS (lớp phủ trên cùng).
+    var active: BinTVPlayerGestureContext? {
+        lock.lock(); let list = contexts; lock.unlock()
+        if let native = list.first(where: { $0.isNative && $0.isActive() }) { return native }
+        return list.first { $0.isActive() }
+    }
+
+    /// Có trình phát nào đang mở? (quyết định vuốt cạnh = TUA)
+    var isPlayerActive: Bool { active != nil }
+
+    /// Trình phát iOS đang phủ màn hình?
+    var isNativePlayerActive: Bool {
+        lock.lock(); let list = contexts; lock.unlock()
+        return list.contains { $0.isNative && $0.isActive() }
+    }
+}
+
 // MARK: - Recognizers (nhận diện để gắn đúng 1 lần, không trùng lặp)
 
 /// Long-press gọi menu — 0.35s, touch KHÔNG bị trễ (delaysTouchesBegan
@@ -337,18 +436,43 @@ final class BinTVMenuLongPressRecognizer: UILongPressGestureRecognizer {
 /// `edgeZone` sát mép và vuốt NGANG vượt `minTranslation` → kích hoạt
 /// **đúng 1 lần** cho mỗi lần vuốt (`hasFired`).
 final class BinTVEdgeSwipeRecognizer: UIPanGestureRecognizer {
-    enum Edge: Equatable { case left, right }
+    /// [build 234] `.top` = vuốt từ TRÊN xuống — CHỈ có nghĩa khi đang ở
+    /// trong trình phát (Return: đóng player).
+    enum Edge: Equatable { case left, right, top }
+
+    /// Phiên TUA của một lần vuốt trong trình phát (xem `handleEdgeSwipe`).
+    /// Giữ vị trí/thời lượng đọc được lúc bắt đầu để tính ĐÍCH TUYỆT ĐỐI —
+    /// không bị trôi (drift) dù seek trước đó chưa hoàn tất.
+    final class SeekSession {
+        let playerName: String
+        /// Vị trí (giây) lúc bắt đầu vuốt — gốc để tính đích tua tuyệt đối.
+        var position: Double = 0
+        /// Thời lượng (giây) lúc bắt đầu vuốt; 0 = chưa biết.
+        var duration: Double = 0
+        init(playerName: String, position: Double, duration: Double) {
+            self.playerName = playerName
+            self.position = position
+            self.duration = duration
+        }
+    }
 
     /// Cạnh mà recognizer này phụ trách.
     var edge: Edge = .left
     /// Bề rộng dải bắt đầu tính từ mép màn hình (pt) — tự co theo màn hình.
     var edgeZone: CGFloat = 40
-    /// Quãng vuốt NGANG tối thiểu để kích hoạt (pt).
+    /// Chiều cao dải bắt đầu tính từ mép TRÊN (pt) — dùng cho `.top`.
+    var topZone: CGFloat = 120
+    /// Quãng vuốt tối thiểu để kích hoạt (pt).
     var minTranslation: CGFloat = 45
-    /// Toạ độ X lúc chạm xuống (ghi ở trạng thái .began).
+    /// Toạ độ lúc chạm xuống (ghi ở trạng thái .began).
     var startX: CGFloat = 0
+    var startY: CGFloat = 0
     /// Đã kích hoạt cho lần vuốt hiện tại chưa (1 lần vuốt = tối đa 1 lần).
     var hasFired = false
+    /// Phiên tua đang chạy (chỉ khi ĐANG ở trong trình phát).
+    var seekSession: SeekSession?
+    /// Thời điểm gửi lệnh tua gần nhất (chống spam seek).
+    var lastSeekDispatch: CFTimeInterval = 0
 }
 
 // MARK: - Gắn gesture lên UIWindow (phủ cả tab lẫn sheet)
@@ -453,6 +577,9 @@ private struct BinTVWindowGestures: UIViewControllerRepresentable {
 
             installEdgeSwipe(.right, on: window)
             installEdgeSwipe(.left, on: window)
+            // [build 234] Vuốt từ TRÊN xuống: chỉ nhận touch khi ĐANG ở trong
+            // trình phát (xem shouldReceive) → không ảnh hưởng tab khác.
+            installEdgeSwipe(.top, on: window)
         }
 
         private func installEdgeSwipe(_ edge: BinTVEdgeSwipeRecognizer.Edge,
@@ -466,6 +593,7 @@ private struct BinTVWindowGestures: UIViewControllerRepresentable {
                                                action: #selector(handleEdgeSwipe(_:)))
             pan.edge = edge
             pan.edgeZone = Self.edgeZone(for: window)
+            pan.topZone = Self.topZone(for: window)
             pan.maximumNumberOfTouches = 1
             // Touch vẫn được giao NGAY cho webview/video/scroll — recognizer
             // này chỉ "ra quyết định" khi ngón BẮT ĐẦU sát mép màn hình và
@@ -483,6 +611,34 @@ private struct BinTVWindowGestures: UIViewControllerRepresentable {
             let width = window.bounds.width
             return min(max(width * 0.09, 30), 70)
         }
+
+        /// [build 234] Dải mép TRÊN (pt) cho vuốt-từ-trên-xuống: ~20% chiều
+        /// cao, kẹp [40, 160] — bắt đầu ở nửa trên màn hình nhưng không lấn
+        /// sâu vào vùng nội dung.
+        private static func topZone(for window: UIWindow) -> CGFloat {
+            let height = window.bounds.height
+            return min(max(height * 0.2, 40), 160)
+        }
+
+        /// [build 234] Điểm bắt đầu có nằm trong dải mép của CHÍNH recognizer
+        /// này không (trái → mép trái, phải → mép phải)? Yêu cầu: chỉ vuốt
+        /// NGANG TỪ CẠNH màn hình mới là tua — vuốt giữa màn hình để nguyên
+        /// hành vi cũ (không cướp thao tác nội dung).
+        private static func isWithinSeekEdge(_ edge: BinTVEdgeSwipeRecognizer.Edge,
+                                            startX: CGFloat,
+                                            window: UIWindow,
+                                            zone: CGFloat) -> Bool {
+            switch edge {
+            case .left:  return startX <= zone
+            case .right: return startX >= window.bounds.width - zone
+            case .top:   return false
+            }
+        }
+
+        /// Chống rung tay khi mới chạm xuống (pt) và nhịp gửi lệnh tua
+        /// (~12 lần/giây) — tránh spam seek vào `<video>`/AVPlayer.
+        private static let seekDeadZone: CGFloat = 12
+        private static let seekThrottle: CFTimeInterval = 0.08
 
         /// Window của app — ƯU TIÊN giữ window đã gắn lần đầu để KHÔNG gắn
         /// nhầm vào window tạm thời do WebKit/AVKit tạo khi phát video
@@ -523,18 +679,70 @@ private struct BinTVWindowGestures: UIViewControllerRepresentable {
 
             if recognizer.state == .began {
                 recognizer.startX = recognizer.location(in: window).x
+                recognizer.startY = recognizer.location(in: window).y
                 recognizer.edgeZone = Self.edgeZone(for: window)   // xoay màn hình
+                recognizer.topZone = Self.topZone(for: window)
                 recognizer.hasFired = false
+                recognizer.seekSession = nil
+                recognizer.lastSeekDispatch = 0
+                // [build 234] ĐANG Ở TRONG TRÌNH PHÁT: vuốt NGANG ở cạnh = TUA
+                // (tương đương giữ & kéo thanh tiến trình) — mở phiên tua
+                // NGAY, không cần vượt ngưỡng dịch chuyển như Return.
+                if recognizer.edge != .top,
+                   let player = BinTVPlayerGestureHub.shared.active,
+                   Self.isWithinSeekEdge(recognizer.edge,
+                                         startX: recognizer.startX,
+                                         window: window,
+                                         zone: recognizer.edgeZone) {
+                    recognizer.seekSession = BinTVEdgeSwipeRecognizer.SeekSession(
+                        playerName: player.name,
+                        position: player.position(),
+                        duration: player.duration())
+                    player.beginSeek()
+                }
                 return
             }
             if recognizer.state == .ended || recognizer.state == .cancelled
                 || recognizer.state == .failed {
+                // Chốt vị trí tua cuối cùng rồi kết thúc phiên tua.
+                if recognizer.seekSession != nil {
+                    if recognizer.state == .ended,
+                       let player = BinTVPlayerGestureHub.shared.active {
+                        self.applySeek(recognizer, player: player, window: window, force: true)
+                    }
+                    BinTVPlayerGestureHub.shared.active?.endSeek()
+                }
+                recognizer.seekSession = nil
                 recognizer.hasFired = false
                 return
             }
-            guard recognizer.state == .changed, !recognizer.hasFired else { return }
+            guard recognizer.state == .changed else { return }
+
+            // [build 234] TRONG TRÌNH PHÁT: kéo ngang = tua, KHÔNG Return.
+            if recognizer.seekSession != nil {
+                if let player = BinTVPlayerGestureHub.shared.active {
+                    self.applySeek(recognizer, player: player, window: window, force: false)
+                }
+                return
+            }
+            guard !recognizer.hasFired else { return }
 
             let translate = recognizer.translation(in: window)
+
+            // [build 234] Vuốt từ TRÊN xuống = RETURN khỏi trình phát (đóng
+            // player → về màn hình trước khi phát). Recognizer `.top` chỉ nhận
+            // touch khi có trình phát đang mở (shouldReceive).
+            if recognizer.edge == .top {
+                guard let player = BinTVPlayerGestureHub.shared.active else { return }
+                guard recognizer.startY <= recognizer.topZone,
+                      translate.y > 0,
+                      abs(translate.y) >= recognizer.minTranslation,
+                      abs(translate.y) > abs(translate.x) * 1.5 else { return }
+                recognizer.hasFired = true
+                player.close()
+                return
+            }
+
             // Chỉ nhận vuốt NGANG — vuốt dọc vẫn là cuộn nội dung bình thường.
             guard abs(translate.x) >= recognizer.minTranslation,
                   abs(translate.x) > abs(translate.y) * 1.5 else { return }
@@ -544,7 +752,7 @@ private struct BinTVWindowGestures: UIViewControllerRepresentable {
                 && recognizer.startX <= recognizer.edgeZone
                 && translate.x > 0 {
                 recognizer.hasFired = true
-                onEdgeLeft()                      // Back 1 bước
+                onEdgeLeft()                      // Return 1 bước
                 return
             }
             if recognizer.edge == .right
@@ -553,6 +761,42 @@ private struct BinTVWindowGestures: UIViewControllerRepresentable {
                 recognizer.hasFired = true
                 onEdgeRight()                     // Hiện menu
             }
+        }
+
+        /// [build 234] Áp dụng vị trí tua theo quãng kéo ngang (chỉ khi ĐANG ở
+        /// trong trình phát). Đích tua là TUYỆT ĐỐI: vị trí lúc bắt đầu vuốt +
+        /// quãng kéo × tốc độ — kéo hết chiều ngang màn hình ≈ 1/3 thời lượng
+        /// phim (tối thiểu 120s, tối đa 600s), cùng cảm giác với thanh tiến
+        /// trình của hệ thống. Lệnh tua được THROTTLE (~12 lần/giây) để không
+        /// spam seek; `force` = chốt vị trí cuối khi thả tay.
+        private func applySeek(_ recognizer: BinTVEdgeSwipeRecognizer,
+                               player: BinTVPlayerGestureContext,
+                               window: UIWindow,
+                               force: Bool) {
+            guard let session = recognizer.seekSession else { return }
+            let translate = recognizer.translation(in: window)
+            guard abs(translate.x) >= Self.seekDeadZone else { return }
+
+            let width = max(window.bounds.width, 1)
+            let span = session.duration > 0
+                ? min(max(session.duration / 3, 120), 600)
+                : 300
+            let secondsPerPoint = span / Double(width)
+            var target = session.position + Double(translate.x) * secondsPerPoint
+            if session.duration > 0 {
+                target = min(max(target, 0), session.duration)
+            } else {
+                target = max(target, 0)
+            }
+
+            let now = CFAbsoluteTimeGetCurrent()
+            if !force, now - recognizer.lastSeekDispatch < Self.seekThrottle { return }
+            recognizer.lastSeekDispatch = now
+            recognizer.hasFired = true
+            PhimDebugLog.step("GESTURE", "seek", "ok",
+                              "player=\(player.name) target=\(Int(target.rounded()))s "
+                              + "duration=\(Int(session.duration.rounded()))s")
+            player.seekTo(target)
         }
 
         /// App quay lại foreground: gắn lại recognizer nếu window đã đổi
