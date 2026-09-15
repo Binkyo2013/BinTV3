@@ -12,6 +12,16 @@ import UIKit
 /// - Video DỌC: KHÔNG xoay, hiển thị letterbox (giữ app ở chế độ TV).
 /// - Đóng player: GIỮ NGUYÊN hướng landscape (bản cũ xoay về portrait ở đây
 ///   — làm app "lọt" về layout dọc giữa chừng sử dụng; đã loại bỏ).
+/// [build 241] Trạng thái điều hướng của player LIVE TV cho MENU LONG-PRESS:
+/// mức pinch FULL (toàn màn hình) hay đang ở sheet inline, cùng closure đóng
+/// sheet. Là class tham chiếu để closure đăng ký với BinTVPlayerMenuCenter
+/// luôn đọc được giá trị MỚI NHẤT (không giữ snapshot của SwiftUI struct).
+private final class LivePlayerMenuModel: ObservableObject {
+    @Published var isFullscreen = false
+    /// Đóng sheet player (về lưới kênh) — gắn từ onAppear (dismiss SwiftUI).
+    var dismissSheet: (() -> Void)?
+}
+
 struct PlayerView: View {
     let channel: Channel
     @StateObject private var manager = AVPlayerManager()
@@ -22,7 +32,9 @@ struct PlayerView: View {
     /// [build 224] Toàn màn hình player native — mức cao nhất của pinch
     /// PHÓNG TO (FIT → FILL → FULL). Dùng chung một AVPlayer nên
     /// chuyển chế độ KHÔNG tải lại stream, không gián đoạn.
-    @State private var isNativeFullscreen = false
+    /// [build 241] Chuyển sang model tham chiếu để menu long-press đọc
+    /// đúng mức FULL/inline cho BACK một-lớp.
+    @StateObject private var menuModel = LivePlayerMenuModel()
     @State private var deviceOrientation = UIDevice.current.orientation
     // iPhone: portrait → .compact; landscape → .regular (kích hoạt re-render khi xoay).
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -42,12 +54,13 @@ struct PlayerView: View {
                                   isFullscreen: false,
                                   onGravityChanged: { manager.setGravity($0) },
                                   onRequestFullscreen: {
-                                      isNativeFullscreen = true
+                                      menuModel.isFullscreen = true
                                       setInterfaceLandscape(true)
                                   },
                                   onRequestExitFullscreen: { },
                                   onLongPressBack: {
-                                      // [build 235] Giữ màn hình trong player
+                                      // Đường DỰ PHÒNG (không lấy được ngữ
+                                      // cảnh menu): giữ màn hình trong player
                                       // inline (sheet) = BACK → đóng sheet.
                                       dismiss()
                                   })
@@ -96,18 +109,19 @@ struct PlayerView: View {
         }
         // [build 224] MÀN HÌNH TOÀN PHẦN (mức FULL của pinch): cùng một
         // AVPlayer → KHÔNG tải lại, KHÔNG gián đoạn; pinch THU NHỎ để thoát.
-        .fullScreenCover(isPresented: $isNativeFullscreen) {
+        .fullScreenCover(isPresented: $menuModel.isFullscreen) {
             BinTVNativePlayer(player: manager.player,
                               gravity: manager.videoGravity,
                               isFullscreen: true,
                               onGravityChanged: { manager.setGravity($0) },
                               onRequestFullscreen: { },
-                              onRequestExitFullscreen: { isNativeFullscreen = false },
+                              onRequestExitFullscreen: { menuModel.isFullscreen = false },
                               onLongPressBack: {
-                                  // [build 235] Giữ màn hình ở mức FULL
-                                  // (fullScreenCover) = BACK 1 bước → thoát
-                                  // về player inline (KHÔNG đóng sheet).
-                                  isNativeFullscreen = false
+                                  // [build 241] Giữ màn hình ở mức FULL
+                                  // (fullScreenCover) = MENU PLAYER; BACK
+                                  // trong menu thoát về player inline
+                                  // (KHÔNG đóng sheet).
+                                  menuModel.isFullscreen = false
                               })
                 .ignoresSafeArea()
                 .background(Color.black.ignoresSafeArea())
@@ -120,6 +134,30 @@ struct PlayerView: View {
             if manager.videoIsLandscape == true {
                 setInterfaceLandscape(true)
             }
+            // [build 241] Đăng ký ngữ cảnh MENU LONG-PRESS cho player LIVE
+            // TV: giữ màn hình → menu LIVE TV/TUBE/SETTING/BACK (không TẬP).
+            // BACK lùi đúng một lớp: FULL cover → inline; inline → lưới kênh.
+            menuModel.dismissSheet = { dismiss() }
+            let model = menuModel
+            BinTVPlayerMenuCenter.shared.register(BinTVPlayerMenuContext(
+                id: "livetv",
+                priority: 80,
+                isActive: { true },
+                kind: { .other },
+                onBack: {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    if model.isFullscreen {
+                        model.isFullscreen = false      // FULL → inline (1 lớp)
+                    } else {
+                        model.dismissSheet?()           // inline → lưới kênh
+                    }
+                },
+                onOpenEpisodes: nil,
+                onLeaveToOtherTab: {
+                    // Rời hẳn sang module khác: gỡ cả cover lẫn sheet.
+                    model.isFullscreen = false
+                    model.dismissSheet?()
+                }))
         }
         // Hướng video mới phát hiện: NGANG → buộc landscape fullscreen
         // (độc lập với khóa xoay thiết bị — giống tab MOVIE).
@@ -143,6 +181,9 @@ struct PlayerView: View {
         }
         .onDisappear {
             manager.stop()
+            // [build 241] Sheet đã đóng — gỡ ngữ cảnh menu player LIVE TV
+            // để giữ màn hình ở lưới kênh trở về hành vi BACK thường.
+            BinTVPlayerMenuCenter.shared.unregister(id: "livetv")
             // App BinTV = chế độ TV LANDSCAPE: đóng player KHÔNG xoay về
             // portrait (giữ layout ngang cho các tab).
         }
@@ -373,13 +414,18 @@ private struct BinTVNativePlayer: UIViewControllerRepresentable {
             }
         }
 
-        /// [build 235] Giữ màn hình ≥0.35s trong player = BACK 1 bước:
-        /// đóng sheet (inline) hoặc thoát fullscreen cover (FULL) — KHÔNG
-        /// thoát app, KHÔNG về Home. Giống nút Back trên Android TV.
+        /// [build 241] Giữ màn hình ≥0.35s trong player LIVE TV: đường
+        /// chính là MENU NGỮ CẢNH của BinTVPlayerMenuCenter
+        /// (LIVE TV/TUBE/SETTING/BACK); chỉ khi không có ngữ cảnh đăng ký
+        /// mới fallback BACK 1 lớp — đóng sheet (inline) hoặc thoát FULL
+        /// cover. KHÔNG thoát app, KHÔNG về Home.
         @objc func handleBackLongPress(_ gesture: UILongPressGestureRecognizer) {
             guard gesture.state == .began else { return }
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            onLongPressBack()
+            BinTVPlayerMenuCenter.shared.handleLongPress { [weak self] in
+                guard let self = self else { return }
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                self.onLongPressBack()
+            }
         }
 
         /// Long-press BACK: NHƯỜNG UIControl / ô nhập liệu (điều khiển gốc
