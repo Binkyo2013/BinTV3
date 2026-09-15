@@ -184,7 +184,12 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
     }
     private var episodeItems: [NativeEpisodeItem] = []
     private var currentEpisodeIndex: Int = -1
-    private var episodesButton: UIButton?
+    // [build 242 — 2026-09-15] ĐÃ GỠ nút "Tập" (UIButton) treo trên
+    // contentOverlayView của AVPlayerViewController: trình phát iOS phải giữ
+    // NGUYÊN giao diện mặc định, KHÔNG có nút TẬP/tiêu đề nào vẽ đè lên video.
+    // Danh sách tập CHỈ mở từ nút TẬP của menu long-press (`requestEpisodePicker`
+    // → `showEpisodePicker`). `episodeItems`/`currentEpisodeIndex` vẫn được giữ
+    // vì menu cần biết phim có ≥2 tập hay không và panel cần tô tập hiện tại.
     private var episodePickerView: UIView?
 
     /// Thời gian chờ tối đa cho MỘT ứng viên trước khi coi như fail.
@@ -628,7 +633,6 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
             // present/ready xong — lúc này mới chắc chắn có contentOverlayView
             // để treo UILabel phụ đề lên.
             self.refreshSubtitleOverlay()
-            self.refreshEpisodesButton()
             if !self.startedReported {
                 self.startedReported = true
                 if let current = self.request { self.onStarted?(current) }
@@ -683,10 +687,17 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
     /// "prepareNext"): huỷ grace ngắn, đặt backstop DÀI hơn trong lúc app.js
     /// hỏi addon lấy stream tập mới. Gọi trên main thread.
     /// [build 236] Đồng bộ danh sách tập + (tuỳ chọn) mở picker trên overlay native.
+    /// [build 242] KHÔNG còn vẽ nút "Tập" cố định lên trình phát: hàm này chỉ
+    /// cập nhật dữ liệu (menu long-press đọc `episodeItems` để quyết định có
+    /// nút TẬP hay không) và đóng/mở PANEL danh sách tập khi được yêu cầu.
     func updateEpisodes(_ items: [(id: String, title: String)], current: Int, showPicker: Bool) {
         episodeItems = items.map { NativeEpisodeItem(id: $0.id, title: $0.title) }
         currentEpisodeIndex = current
-        refreshEpisodesButton()
+        // Phim lẻ / hết danh sách tập → không bao giờ để panel mở sót lại.
+        if episodeItems.count < 2 {
+            hideEpisodePicker()
+            return
+        }
         if showPicker { showEpisodePicker() } else { hideEpisodePicker() }
     }
 
@@ -1015,36 +1026,20 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
         if label.text != text { label.text = text }
     }
 
-    private func refreshEpisodesButton() {
-        guard let overlay = playerController?.contentOverlayView else { return }
-        if episodeItems.count < 2 {
-            removeEpisodesButton()
-            hideEpisodePicker()
-            return
-        }
-        if episodesButton == nil {
-            let button = UIButton(type: .system)
-            button.translatesAutoresizingMaskIntoConstraints = false
-            button.setTitle("Tập", for: .normal)
-            button.titleLabel?.font = UIFont.systemFont(ofSize: 16, weight: .bold)
-            button.setTitleColor(.white, for: .normal)
-            button.backgroundColor = UIColor(red: 1, green: 0.1, blue: 0.72, alpha: 0.55)
-            button.layer.cornerRadius = 10
-            button.contentEdgeInsets = UIEdgeInsets(top: 8, left: 14, bottom: 8, right: 14)
-            button.addTarget(self, action: #selector(toggleEpisodePicker), for: .touchUpInside)
-            overlay.addSubview(button)
-            NSLayoutConstraint.activate([
-                button.topAnchor.constraint(equalTo: overlay.safeAreaLayoutGuide.topAnchor, constant: 12),
-                button.trailingAnchor.constraint(equalTo: overlay.safeAreaLayoutGuide.trailingAnchor, constant: -16)
-            ])
-            episodesButton = button
-        }
-        episodesButton?.isHidden = false
-    }
-
-    @objc private func toggleEpisodePicker() {
-        if episodePickerView != nil { hideEpisodePicker() } else { showEpisodePicker() }
-    }
+    // =================================================================
+    // [build 242 — 2026-09-15] ĐÃ XOÁ `refreshEpisodesButton()` /
+    // `toggleEpisodePicker()` / `removeEpisodesButton()`.
+    //
+    // Trước đây controller tự vẽ một UIButton "Tập" (nền hồng, góc phải trên)
+    // lên `contentOverlayView` của AVPlayerViewController → nút TẬP hiện CỐ
+    // ĐỊNH đè lên giao diện trình phát mặc định của iOS. Theo yêu cầu mới,
+    // trình phát KHÔNG được có bất kỳ nút TẬP/tiêu đề nào vẽ đè:
+    //   • giao diện AVPlayerViewController giữ nguyên 100% mặc định;
+    //   • TẬP chỉ còn trong MENU LONG-PRESS (GestureOverlayMenuView →
+    //     BinTVPlayerMenuCenter → `requestEpisodePicker()`);
+    //   • panel danh sách tập (`showEpisodePicker`) GIỮ NGUYÊN — nó chỉ hiện
+    //     khi người dùng chủ động mở từ menu, không phải nút luôn hiển thị.
+    // =================================================================
 
     private func showEpisodePicker() {
         guard let overlay = playerController?.contentOverlayView else { return }
@@ -1120,11 +1115,6 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
     private func hideEpisodePicker() {
         episodePickerView?.removeFromSuperview()
         episodePickerView = nil
-    }
-
-    private func removeEpisodesButton() {
-        episodesButton?.removeFromSuperview()
-        episodesButton = nil
     }
 
     /// Gỡ label + observer (tắt phụ đề / đổi nguồn / đóng player).

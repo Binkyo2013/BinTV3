@@ -25,6 +25,10 @@
  *   SUITE E (build 236) — KẾT THÚC PHÁT, PHIM BỘ / PHIM LẺ:
  *     BỘ còn tập: hết tập → KHÔNG tự phát tập kế; giữ player + mở danh sách
  *     tập trong player; BỘ hết tập cuối → về CHỌN TẬP; LẺ hết → về lưới PHIM.
+ *   SUITE H (build 242) — GỠ NÚT "TẬP" + TÊN PHIM KHỎI TRÌNH PHÁT:
+ *     player web (index.html/app.js/CSS) và player native iOS KHÔNG còn nút
+ *     TẬP/tiêu đề vẽ đè lên video; TẬP chỉ mở từ menu long-press qua điểm vào
+ *     window.__bintvOpenPlayerEpisodes (web) / requestEpisodePicker (native).
  *   SUITE F (build 234) — ƯU TIÊN TRÌNH PHÁT + GESTURE ĐIỀU HƯỚNG:
  *     Ưu tiên 1 = trình phát TÍCH HỢP của app (thẻ <video>): nguồn MKV/AC3
  *     cũng KHÔNG được handoff sớm sang trình phát iOS; chỉ khi trình phát
@@ -911,8 +915,9 @@ function suiteG() {
     check("G", "Player web PHIM đăng ký 'phim-web' (ưu tiên 50)",
           /id: "phim-web"/.test(webViewSrc) && /priority: 50/.test(webViewSrc)
           && /webEpisodeCount \?\? 0\) >= 2/.test(webViewSrc));
-    check("G", "TẬP của player web click đúng nút 'Tập' của app.js",
-          /bintv-movie-player-episodes-btn/.test(webViewSrc));
+    check("G", "TẬP của player web gọi điểm vào __bintvOpenPlayerEpisodes (không click nút DOM)",
+          /__bintvOpenPlayerEpisodes/.test(webViewSrc)
+          && !/bintv-movie-player-episodes-btn/.test(webViewSrc));
     check("G", "TUBE đăng ký 'tube' (ưu tiên 60) — menu KHÔNG có TẬP",
           /id: "tube"/.test(tubeSrc) && /priority: 60/.test(tubeSrc)
           && /kind: \{ \.other \}/.test(tubeSrc));
@@ -955,10 +960,13 @@ function suiteG() {
     ], "series", "Phim Bộ", 0);
     hS.startPlayback("https://cdn.vn/f/ep1.mp4", "Phim Bộ T1", { name: "1080p AAC" });
     check("G", "PHIM BỘ 3 tập: hasEpisodeList = true", hS.hasEpisodeList() === true);
-    const btnS = winS.document.getElementById("bintv-movie-player-episodes-btn");
-    check("G", "PHIM BỘ: nút TẬP tồn tại trong player", !!btnS);
-    btnS.click();
-    check("G", "PHIM BỘ: click TẬP → mở danh sách tập trong player",
+    // [build 242] Nút TẬP trên màn hình video đã bị GỠ — menu long-press gọi
+    // thẳng điểm vào window.__bintvOpenPlayerEpisodes() của app.js.
+    check("G", "PHIM BỘ: điểm vào TẬP cho menu long-press tồn tại",
+          typeof winS.__bintvOpenPlayerEpisodes === "function");
+    check("G", "PHIM BỘ: gọi TẬP (từ menu) trả true",
+          winS.__bintvOpenPlayerEpisodes() === true);
+    check("G", "PHIM BỘ: gọi TẬP → mở danh sách tập trong player",
           winS.document.getElementById("bintv-movie-player-episodes").classList.contains("show"));
     const epPostsS = winS.__posted.filter(function (m) { return m.action === "episodes"; });
     const epShow = epPostsS[epPostsS.length - 1];
@@ -978,10 +986,156 @@ function suiteG() {
     check("G", "PHIM LẺ: app.js post episodes items: [] (Swift ẩn nút TẬP)",
           epPostsL.some(function (m) { return Array.isArray(m.items) && m.items.length === 0; }),
           JSON.stringify(epPostsL));
-    const btnL = winL.document.getElementById("bintv-movie-player-episodes-btn");
-    if (btnL) btnL.click();
-    check("G", "PHIM LẺ: click TẬP KHÔNG mở được danh sách tập",
+    check("G", "PHIM LẺ: gọi TẬP trả false (không mở danh sách tập)",
+          winL.__bintvOpenPlayerEpisodes() === false);
+    check("G", "PHIM LẺ: danh sách tập KHÔNG mở",
           !winL.document.getElementById("bintv-movie-player-episodes").classList.contains("show"));
+}
+
+// =====================================================================
+// SUITE H (build 242) — TRÌNH PHÁT KHÔNG CÒN NÚT "TẬP" / TÊN PHIM
+// ---------------------------------------------------------------------
+// Yêu cầu: gỡ HOÀN TOÀN nút TẬP + tên phim đang render trực tiếp trong
+// trình phát video (cả player web của app.js lẫn player native iOS), giữ
+// nguyên chức năng TẬP trong MENU LONG-PRESS.
+// =====================================================================
+function suiteH() {
+    console.log("\n=== SUITE H (build 242): gỡ nút TẬP + tên phim khỏi trình phát ===");
+    const indexHtml = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
+    const appJs = fs.readFileSync(path.join(ASSETS, "app.js"), "utf8");
+    const webViewSrc = fs.readFileSync(SWIFT_WEBVIEW, "utf8");
+    const nativeSrc = fs.readFileSync(path.join(REPO, "BinTV", "Player", "PhimNativePlayerController.swift"), "utf8");
+    const menuSrc = fs.readFileSync(path.join(REPO, "BinTV", "Views", "GestureOverlayMenuView.swift"), "utf8");
+    const cssFiles = ["style.css", "landscape.css", "phone.css", "phim_ui.css"].map(function (f) {
+        return { name: f, src: fs.readFileSync(path.join(ASSETS, f), "utf8") };
+    });
+
+    // --- H1: HTML tĩnh -------------------------------------------------
+    check("H", "index.html KHÔNG còn nút 'Tập' (#bintv-movie-player-episodes-btn)",
+          indexHtml.indexOf("bintv-movie-player-episodes-btn") === -1);
+    check("H", "index.html KHÔNG còn tên phim trong player (#bintv-movie-player-title)",
+          indexHtml.indexOf("bintv-movie-player-title") === -1);
+    check("H", "index.html KHÔNG còn class .movie-player-title / .movie-player-episodes-btn",
+          !/class="[^"]*movie-player-title/.test(indexHtml)
+          && !/class="[^"]*movie-player-episodes-btn/.test(indexHtml));
+    check("H", "index.html VẪN còn danh sách tập #bintv-movie-player-episodes (menu TẬP mở)",
+          /id="bintv-movie-player-episodes"/.test(indexHtml)
+          && /id="bintv-movie-player-episodes-list"/.test(indexHtml));
+    check("H", "index.html VẪN còn dòng trạng thái + timeline + phụ đề của player",
+          /id="bintv-movie-player-status"/.test(indexHtml)
+          && /id="bintv-movie-seek-timeline"/.test(indexHtml)
+          && /id="bintv-movie-subtitle-text"/.test(indexHtml));
+
+    // --- H2: app.js (template dựng player + hàm) -----------------------
+    check("H", "app.js KHÔNG còn tạo nút 'Tập' khi dựng player",
+          appJs.indexOf("bintv-movie-player-episodes-btn") === -1
+          || appJs.split("bintv-movie-player-episodes-btn").length - 1
+             === (appJs.match(/\/\/.*bintv-movie-player-episodes-btn/g) || []).length);
+    check("H", "app.js KHÔNG còn phần tử tên phim #bintv-movie-player-title",
+          appJs.indexOf("getElementById(\"bintv-movie-player-title\")") === -1);
+    check("H", "app.js bỏ hẳn wireMoviePlayerEpisodeButton / refreshMoviePlayerEpisodeButton",
+          appJs.indexOf("wireMoviePlayerEpisodeButton") === -1
+          && appJs.indexOf("refreshMoviePlayerEpisodeButton") === -1);
+    check("H", "app.js export điểm vào TẬP cho menu long-press",
+          /window\.__bintvOpenPlayerEpisodes = function/.test(appJs));
+    check("H", "app.js GIỮ NGUYÊN hàm mở danh sách tập + đồng bộ native",
+          /function openMoviePlayerEpisodeMenu\(\)/.test(appJs)
+          && /function syncNativeEpisodeList\(showPicker\)/.test(appJs)
+          && /function renderMoviePlayerEpisodeMenu\(\)/.test(appJs));
+
+    // --- H3: CSS không còn rule của nút/tên phim -----------------------
+    cssFiles.forEach(function (css) {
+        check("H", css.name + " không còn rule .movie-player-episodes-btn / .movie-player-title",
+              !/\.movie-player-episodes-btn\s*[{:]/.test(css.src)
+              && !/\.movie-player-title\s*[{:]/.test(css.src));
+    });
+
+    // --- H4: player NATIVE iOS không vẽ nút "Tập" lên overlay ----------
+    check("H", "Swift native KHÔNG còn tạo UIButton \"Tập\" trên trình phát",
+          nativeSrc.indexOf("setTitle(\"Tập\"") === -1
+          && nativeSrc.indexOf("episodesButton") === -1);
+    check("H", "Swift native bỏ refreshEpisodesButton / toggleEpisodePicker / removeEpisodesButton",
+          !/func refreshEpisodesButton/.test(nativeSrc)
+          && !/func toggleEpisodePicker/.test(nativeSrc)
+          && !/func removeEpisodesButton/.test(nativeSrc));
+    check("H", "Swift native KHÔNG thêm subview cố định nào khác vào contentOverlayView ngoài phụ đề/panel tập",
+          (nativeSrc.match(/overlay\.addSubview\(/g) || []).length === 2);
+    check("H", "Swift native VẪN giữ panel danh sách tập + điểm vào từ menu",
+          /func requestEpisodePicker\(\)/.test(nativeSrc)
+          && /private func showEpisodePicker\(\)/.test(nativeSrc)
+          && /private func hideEpisodePicker\(\)/.test(nativeSrc)
+          && /func updateEpisodes\(/.test(nativeSrc));
+    check("H", "Menu long-press VẪN có nút TẬP cho phim bộ (GestureOverlayMenuView)",
+          /label: "TẬP"/.test(menuSrc) && /case \.phim\(let episodes\) = kind, episodes/.test(menuSrc));
+    check("H", "Swift (web) KHÔNG còn tham chiếu nút DOM đã gỡ",
+          webViewSrc.indexOf("bintv-movie-player-episodes-btn") === -1);
+
+    // --- H5: RUNTIME (jsdom) — DOM player thật sau khi phát ------------
+    const win = makeWindow("http://127.0.0.1:3000/?android=phone&ios=landscape", true);
+    bootWebApp(win, scriptList(false));
+    const hooks = win.__bintvMoviePlaybackHooks;
+    hooks.setBrowserOpen(true);
+    hooks.setEpisodes([
+        { id: "e1", title: "Tập 1" },
+        { id: "e2", title: "Tập 2" },
+        { id: "e3", title: "Tập 3" }
+    ], "series", "Phim Bộ Nhiều Tập", 0);
+    hooks.startPlayback("https://cdn.vn/f/ep1.mp4", "Phim Bộ Nhiều Tập · Tập 1", { name: "1080p AAC" });
+
+    const doc = win.document;
+    const player = doc.getElementById("bintv-movie-player");
+    const overlay = player.querySelector(".movie-player-overlay");
+    check("H", "RUNTIME: player không có phần tử #bintv-movie-player-episodes-btn",
+          doc.getElementById("bintv-movie-player-episodes-btn") === null);
+    check("H", "RUNTIME: player không có phần tử #bintv-movie-player-title",
+          doc.getElementById("bintv-movie-player-title") === null);
+    check("H", "RUNTIME: overlay trình phát KHÔNG chứa bất kỳ <button> nào",
+          overlay.querySelectorAll("button").length === 0,
+          String(overlay.querySelectorAll("button").length));
+    check("H", "RUNTIME: overlay trình phát KHÔNG hiển thị tên phim",
+          overlay.textContent.indexOf("Phim Bộ Nhiều Tập") === -1, overlay.textContent);
+    check("H", "RUNTIME: TOÀN BỘ player không còn nút nào chữ 'Tập'",
+          Array.prototype.slice.call(player.querySelectorAll("button"))
+              .filter(function (b) { return (b.textContent || "").trim() === "Tập"; }).length === 0);
+    check("H", "RUNTIME: trạng thái phát vẫn hiển thị (không phá HUD còn lại)",
+          doc.getElementById("bintv-movie-player-status").textContent.length > 0);
+
+    // Menu long-press (Swift) gọi điểm vào → danh sách tập mở + đủ 3 tập.
+    check("H", "RUNTIME: điểm vào TẬP của menu mở danh sách tập",
+          win.__bintvOpenPlayerEpisodes() === true
+          && doc.getElementById("bintv-movie-player-episodes").classList.contains("show"));
+    const rows = doc.querySelectorAll("#bintv-movie-player-episodes-list .movie-player-episode-option");
+    check("H", "RUNTIME: danh sách tập render đủ 3 tập đúng tiêu đề",
+          rows.length === 3 && rows[0].textContent === "Tập 1" && rows[2].textContent === "Tập 3",
+          rows.length + " rows");
+    check("H", "RUNTIME: tập đang phát được đánh dấu current",
+          rows[0].classList.contains("current"));
+
+    // Player bị gỡ khỏi DOM rồi dựng lại (nhánh ensureMovieExperienceUI tạo
+    // innerHTML) cũng KHÔNG được sinh ra nút TẬP/tên phim mới.
+    player.parentNode.removeChild(player);
+    hooks.startPlayback("https://cdn.vn/f/ep2.mp4", "Phim Bộ Nhiều Tập · Tập 2", { name: "720p" });
+    const rebuilt = doc.getElementById("bintv-movie-player");
+    check("H", "RUNTIME: player dựng lại không sinh nút TẬP/tên phim",
+          !!rebuilt
+          && rebuilt.querySelector("#bintv-movie-player-episodes-btn") === null
+          && rebuilt.querySelector("#bintv-movie-player-title") === null
+          && rebuilt.querySelector(".movie-player-overlay button") === null);
+    check("H", "RUNTIME: player dựng lại vẫn có danh sách tập (mở từ menu)",
+          !!rebuilt.querySelector("#bintv-movie-player-episodes-list"));
+
+    // Phim lẻ: điểm vào TẬP trả false, không sinh nút nào.
+    const winL = makeWindow("http://127.0.0.1:3000/?android=phone&ios=landscape", true);
+    bootWebApp(winL, scriptList(false));
+    const hL = winL.__bintvMoviePlaybackHooks;
+    hL.setBrowserOpen(true);
+    hL.setEpisodes([{ id: "m1", title: "Phim Lẻ" }], "movie", "Phim Lẻ", -1);
+    hL.startPlayback("https://cdn.vn/f/movie.mp4", "Phim Lẻ 2026", { name: "1080p" });
+    check("H", "RUNTIME phim lẻ: không có nút TẬP/tên phim trong player",
+          winL.document.getElementById("bintv-movie-player-episodes-btn") === null
+          && winL.document.getElementById("bintv-movie-player-title") === null);
+    check("H", "RUNTIME phim lẻ: điểm vào TẬP trả false",
+          winL.__bintvOpenPlayerEpisodes() === false);
 }
 
 async function main() {
@@ -991,6 +1145,7 @@ async function main() {
     suiteE();
     suiteF();
     suiteG();
+    suiteH();
     await suiteD();
     console.log("\n=========================================");
     console.log("PASS: " + pass + "   FAIL: " + fail);

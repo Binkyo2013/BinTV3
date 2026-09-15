@@ -180,8 +180,8 @@
 .movie-episodes-help { margin-top: 12px; font-size: 12px; }
 
 /* ---------- Player ---------- */
-.movie-player-title { max-width: 92vw; font-size: 20px; }
-.movie-player-status { margin-top: 4px; font-size: 14px; }
+/* [build 242] `.movie-player-title` đã bị gỡ (không hiện tên phim trong player). */
+.movie-player-status { margin-top: 0; font-size: 14px; }
 .movie-subtitle-text {
     left: 5%;
     right: 5%;

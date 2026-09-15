@@ -213,9 +213,9 @@
 /* ---------- Dialog tìm kiếm: giữ cỡ phone (đã hợp lý) ---------- */
 .movie-search-dialog { max-width: 640px; }
 
-/* ---------- Player: title/status compact, timeline trải ngang ---------- */
-.movie-player-title { max-width: 80vw; font-size: 17px; }
-.movie-player-status { margin-top: 2px; font-size: 13px; }
+/* ---------- Player: status compact, timeline trải ngang ---------- */
+/* [build 242] `.movie-player-title` đã bị gỡ (không hiện tên phim trong player). */
+.movie-player-status { margin-top: 0; font-size: 13px; }
 .movie-subtitle-text {
     left: 4%;
     right: 4%;
