@@ -298,6 +298,25 @@ body {
 }
 .movie-player-title { max-width: 1450px; font-size: 32px; font-weight: 700; }
 .movie-player-status { margin-top: 8px; color: rgba(255,255,255,.78); font-size: 20px; }
+.movie-player-episodes-btn {
+    display: none;
+    pointer-events: auto;
+    margin-top: 12px;
+    min-width: 88px;
+    height: 40px;
+    padding: 0 16px;
+    align-items: center;
+    justify-content: center;
+    border: 2px solid rgba(255,255,255,.45);
+    border-radius: 10px;
+    background: rgba(255,25,185,.28);
+    color: #fff;
+    font-family: Arial, sans-serif;
+    font-size: 18px;
+    font-weight: 700;
+    cursor: pointer;
+}
+.movie-player-episodes-btn:active { transform: scale(.96); }
 
 .movie-seek-timeline {
     position: absolute; left: 90px; right: 90px; bottom: 46px; z-index: 12;

@@ -126,6 +126,8 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
     /// gửi stop() để đóng player. Nếu JS im lặng, backstop tự ĐÓNG player
     /// (không bao giờ để trình phát treo bắt buộc tắt cả app BinTV).
     var onEnded: ((PhimNativePlaybackRequest) -> Void)?
+    /// [build 236] Người dùng chọn tập từ overlay native (không thoát player).
+    var onSelectEpisode: ((Int, String) -> Void)?
     /// WebView vừa được tái tạo nhưng player native vẫn sống. Host dùng callback
     /// này để đồng bộ lại lớp UI JS, không phát lại/khởi tạo nguồn thứ hai.
     var onStateReconciled: ((PhimNativePlaybackRequest, TimeInterval, Bool) -> Void)?
@@ -175,6 +177,15 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
     private var subtitleCues: [NativeSubtitleCue] = []
     private var subtitleLabel: UILabel?
     private var subtitleTimeObserver: Any?
+
+    private struct NativeEpisodeItem {
+        let id: String
+        let title: String
+    }
+    private var episodeItems: [NativeEpisodeItem] = []
+    private var currentEpisodeIndex: Int = -1
+    private var episodesButton: UIButton?
+    private var episodePickerView: UIView?
 
     /// Thời gian chờ tối đa cho MỘT ứng viên trước khi coi như fail.
     private static let candidateTimeout: TimeInterval = 20
@@ -564,6 +575,7 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
             // present/ready xong — lúc này mới chắc chắn có contentOverlayView
             // để treo UILabel phụ đề lên.
             self.refreshSubtitleOverlay()
+            self.refreshEpisodesButton()
             if !self.startedReported {
                 self.startedReported = true
                 if let current = self.request { self.onStarted?(current) }
@@ -617,6 +629,18 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
     /// JS báo "đang nạp tập tiếp theo — GIỮ player mở" (message action
     /// "prepareNext"): huỷ grace ngắn, đặt backstop DÀI hơn trong lúc app.js
     /// hỏi addon lấy stream tập mới. Gọi trên main thread.
+    /// [build 236] Đồng bộ danh sách tập + (tuỳ chọn) mở picker trên overlay native.
+    func updateEpisodes(_ items: [(id: String, title: String)], current: Int, showPicker: Bool) {
+        episodeItems = items.map { NativeEpisodeItem(id: $0.id, title: $0.title) }
+        currentEpisodeIndex = current
+        refreshEpisodesButton()
+        if showPicker { showEpisodePicker() } else { hideEpisodePicker() }
+    }
+
+    func hideEpisodePickerOverlay() {
+        hideEpisodePicker()
+    }
+
     func prepareNextEpisode() {
         guard waitingForNextInstruction, let current = request else { return }
         PhimDebugLog.step("NATIVE", "prepareNext", "ok",
@@ -936,6 +960,118 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
         if candidate >= 0 && time <= cues[candidate].end { text = cues[candidate].text }
         else { text = "" }
         if label.text != text { label.text = text }
+    }
+
+    private func refreshEpisodesButton() {
+        guard let overlay = playerController?.contentOverlayView else { return }
+        if episodeItems.count < 2 {
+            removeEpisodesButton()
+            hideEpisodePicker()
+            return
+        }
+        if episodesButton == nil {
+            let button = UIButton(type: .system)
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.setTitle("Tập", for: .normal)
+            button.titleLabel?.font = UIFont.systemFont(ofSize: 16, weight: .bold)
+            button.setTitleColor(.white, for: .normal)
+            button.backgroundColor = UIColor(red: 1, green: 0.1, blue: 0.72, alpha: 0.55)
+            button.layer.cornerRadius = 10
+            button.contentEdgeInsets = UIEdgeInsets(top: 8, left: 14, bottom: 8, right: 14)
+            button.addTarget(self, action: #selector(toggleEpisodePicker), for: .touchUpInside)
+            overlay.addSubview(button)
+            NSLayoutConstraint.activate([
+                button.topAnchor.constraint(equalTo: overlay.safeAreaLayoutGuide.topAnchor, constant: 12),
+                button.trailingAnchor.constraint(equalTo: overlay.safeAreaLayoutGuide.trailingAnchor, constant: -16)
+            ])
+            episodesButton = button
+        }
+        episodesButton?.isHidden = false
+    }
+
+    @objc private func toggleEpisodePicker() {
+        if episodePickerView != nil { hideEpisodePicker() } else { showEpisodePicker() }
+    }
+
+    private func showEpisodePicker() {
+        guard let overlay = playerController?.contentOverlayView else { return }
+        hideEpisodePicker()
+        let panel = UIView()
+        panel.translatesAutoresizingMaskIntoConstraints = false
+        panel.backgroundColor = UIColor(white: 0.08, alpha: 0.94)
+        panel.layer.cornerRadius = 14
+        overlay.addSubview(panel)
+        NSLayoutConstraint.activate([
+            panel.leadingAnchor.constraint(equalTo: overlay.leadingAnchor, constant: 16),
+            panel.trailingAnchor.constraint(equalTo: overlay.trailingAnchor, constant: -16),
+            panel.bottomAnchor.constraint(equalTo: overlay.safeAreaLayoutGuide.bottomAnchor, constant: -16),
+            panel.heightAnchor.constraint(lessThanOrEqualTo: overlay.heightAnchor, multiplier: 0.42)
+        ])
+        let stack = UIStackView()
+        stack.axis = .vertical
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        panel.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: panel.topAnchor, constant: 12),
+            stack.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -12),
+            stack.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -12)
+        ])
+        let title = UILabel()
+        title.text = "Danh sách tập"
+        title.textColor = .white
+        title.font = UIFont.systemFont(ofSize: 18, weight: .bold)
+        stack.addArrangedSubview(title)
+        let scroll = UIScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        let rowStack = UIStackView()
+        rowStack.axis = .horizontal
+        rowStack.spacing = 8
+        rowStack.translatesAutoresizingMaskIntoConstraints = false
+        scroll.addSubview(rowStack)
+        NSLayoutConstraint.activate([
+            rowStack.topAnchor.constraint(equalTo: scroll.topAnchor),
+            rowStack.bottomAnchor.constraint(equalTo: scroll.bottomAnchor),
+            rowStack.leadingAnchor.constraint(equalTo: scroll.leadingAnchor),
+            rowStack.trailingAnchor.constraint(equalTo: scroll.trailingAnchor),
+            rowStack.heightAnchor.constraint(equalTo: scroll.heightAnchor)
+        ])
+        for (index, item) in episodeItems.enumerated() {
+            let button = UIButton(type: .system)
+            button.tag = index
+            button.setTitle(item.title, for: .normal)
+            button.setTitleColor(index == currentEpisodeIndex ? .black : .white, for: .normal)
+            button.backgroundColor = index == currentEpisodeIndex
+                ? UIColor.white
+                : UIColor.white.withAlphaComponent(0.14)
+            button.layer.cornerRadius = 8
+            button.contentEdgeInsets = UIEdgeInsets(top: 10, left: 12, bottom: 10, right: 12)
+            button.addTarget(self, action: #selector(pickEpisode(_:)), for: .touchUpInside)
+            rowStack.addArrangedSubview(button)
+        }
+        scroll.heightAnchor.constraint(equalToConstant: 56).isActive = true
+        stack.addArrangedSubview(scroll)
+        episodePickerView = panel
+        player?.pause()
+    }
+
+    @objc private func pickEpisode(_ sender: UIButton) {
+        let index = sender.tag
+        guard index >= 0, index < episodeItems.count else { return }
+        currentEpisodeIndex = index
+        hideEpisodePicker()
+        onSelectEpisode?(index, episodeItems[index].id)
+    }
+
+    private func hideEpisodePicker() {
+        episodePickerView?.removeFromSuperview()
+        episodePickerView = nil
+    }
+
+    private func removeEpisodesButton() {
+        episodesButton?.removeFromSuperview()
+        episodesButton = nil
     }
 
     /// Gỡ label + observer (tắt phụ đề / đổi nguồn / đóng player).
