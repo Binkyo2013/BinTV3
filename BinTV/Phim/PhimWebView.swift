@@ -1223,6 +1223,28 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         let action = text("action")
         let url = text("url", "streamUrl", "streamURL", "src")
         let proxyURL = text("proxyUrl", "proxyURL", "proxy")
+        if action == "episodes" {
+            var items: [(id: String, title: String)] = []
+            if let raw = dict["items"] as? [[String: Any]] {
+                for row in raw {
+                    let id = (row["id"] as? String) ?? ""
+                    let title = (row["title"] as? String) ?? id
+                    if !id.isEmpty { items.append((id: id, title: title)) }
+                }
+            }
+            let current = (dict["current"] as? NSNumber)?.intValue ?? -1
+            let show = Self.boolValue(dict["show"]) ?? false
+            let apply: () -> Void = { [weak self] in
+                self?.nativePlayer.updateEpisodes(items, current: current, showPicker: show)
+            }
+            if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
+            return
+        }
+        if action == "hideEpisodes" {
+            let hide: () -> Void = { [weak self] in self?.nativePlayer.hideEpisodePickerOverlay() }
+            if Thread.isMainThread { hide() } else { DispatchQueue.main.async(execute: hide) }
+            return
+        }
         // [build 233] Phim bộ: JS báo "đang nạp tập tiếp theo — GIỮ player
         // mở" sau khi native phát hết tập (chống backstop tự đóng quá sớm).
         if action == "prepareNext" {
