@@ -1,18 +1,18 @@
 /* =====================================================
    PHIM - PLAYER HUD (Android v1.2.1)
-   - Tu AN overlay (ten phim + trang thai "Dang phat") khi dang phat;
+   - Tu AN overlay (trang thai "Dang phat") khi dang phat;
      hien lai khi tam dung / dang tai / nguoi dung tuong tac.
    - Khi HUD hien: timeline nhan duoc cham (keo de tua tren dien thoai).
    - Nut tam dung giua man hinh (chi tao tren dien thoai boi
      phim_player_ui.js).
+   [build 242 - 2026-09-15] Overlay KHONG con ten phim va nut "Tap":
+   rule pointer-events cho .movie-player-episodes-btn da bi go (nut khong
+   con ton tai trong DOM). Danh sach tap chi mo tu menu long-press.
    ===================================================== */
 
 #bintv-movie-player .movie-player-overlay {
     transition: opacity .25s ease, visibility 0s linear 0s;
     pointer-events: none;
-}
-#bintv-movie-player .movie-player-episodes-btn {
-    pointer-events: auto;
 }
 #bintv-movie-player.phim-hud-hidden .movie-player-overlay {
     opacity: 0;

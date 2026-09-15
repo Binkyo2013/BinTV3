@@ -293,10 +293,13 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
             onLeaveToOtherTab: nil))
     }
 
-    /// [build 241] Nút TẬP: mở danh sách tập NGAY TRONG player web bằng
-    /// chính nút "Tập" của app.js (`openMoviePlayerEpisodeMenu` — chỉ mở khi
-    /// phim có nhiều tập; nếu đang chạy player native thì hành động tương tự
-    /// cũng đồng bộ picker sang native).
+    /// [build 241] Nút TẬP: mở danh sách tập NGAY TRONG player web.
+    /// [build 242 — 2026-09-15] app.js KHÔNG còn render nút "Tập" trên màn
+    /// hình video (nút TẬP chỉ tồn tại trong menu long-press này), nên thay vì
+    /// `.click()` vào nút DOM đã bị gỡ, ta gọi THẲNG điểm vào hàm mà app.js
+    /// export: `window.__bintvOpenPlayerEpisodes()` → `openMoviePlayerEpisodeMenu`
+    /// (chỉ mở khi phim có nhiều tập; nếu đang chạy player native thì app.js
+    /// vẫn đồng bộ picker sang native như cũ — hành vi không đổi).
     private func openWebEpisodeList() {
         PhimDebugLog.step("MENU", "webEpisodes", "go", "count=\(webEpisodeCount)")
         evaluateJS(Self.jsOpenEpisodeList)
@@ -305,8 +308,14 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     private static let jsOpenEpisodeList = """
     (function () {
         try {
-            var b = document.getElementById('bintv-movie-player-episodes-btn');
-            if (b) { b.click(); return true; }
+            if (typeof window.__bintvOpenPlayerEpisodes === 'function') {
+                return !!window.__bintvOpenPlayerEpisodes();
+            }
+            var hooks = window.__bintvMoviePlaybackHooks;
+            if (hooks && typeof hooks.openPlayerEpisodes === 'function') {
+                hooks.openPlayerEpisodes();
+                return true;
+            }
             return false;
         } catch (e) { return false; }
     })();

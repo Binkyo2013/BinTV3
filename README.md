@@ -1,13 +1,12 @@
 # BinTV iOS — TrollStore Build (FIXED)
 
-> **Bản mới nhất: 2.5.3 (build 234)** — Phim BỘ hết tập: trình phát tự đóng
-> rồi **TỰ ĐỘNG phát tập tiếp theo** (không dừng ở màn hình chọn tập) ·
-> **ưu tiên 1 = trình phát TÍCH HỢP** của app (trình phát iOS chỉ dùng khi
-> trình phát tích hợp không phát được) · gesture điều hướng: vuốt cạnh trái
-> = RETURN, trong trình phát vuốt ngang cạnh = TUA, vuốt từ trên xuống =
-> đóng trình phát. Chi tiết: mục `### Build 234 (2.5.3)` ở cuối file · Cách
-> lấy file: artifact `BinTV-trollstore-unsigned` (chứa `BinTV.ipa`) của
-> workflow "Build unsigned IPA (TrollStore)".
+> **Bản mới nhất: 2.5.8 (build 242)** — **GỠ nút "TẬP" + TÊN PHIM khỏi màn
+> hình trình phát**: player iOS giữ nguyên giao diện mặc định, player web chỉ
+> còn dòng trạng thái; **TẬP chỉ còn trong MENU LONG-PRESS** (giữ màn hình
+> khi đang phát → LIVE TV · TUBE · SETTING · TẬP · BACK; phim lẻ 1 tập không
+> có TẬP). Chi tiết: mục `### Build 242 (2.5.8)` ở cuối file · Cách lấy file:
+> artifact `BinTV-trollstore-unsigned` (chứa `BinTV.ipa`) của workflow
+> "Build unsigned IPA (TrollStore)".
 
 ## Build by GitHub Actions
 
@@ -659,3 +658,67 @@ LIVE TV/TUBE/SETTING và nguồn `.json` của PHIM không thay đổi.
 (170 cũ + SUITE G mới: mặc định PHIM, menu 4/5 nút theo ngữ cảnh, TẬP chỉ cho
 phim bộ, BACK một lớp, mọi recognizer đi qua menu center; runtime app.js khẳng
 định nút TẬP mở danh sách cho phim bộ 3 tập và bị bỏ qua với phim lẻ).
+
+### Build 242 (2.5.8) — Gỡ nút "TẬP" + tên phim khỏi trình phát (TẬP chỉ còn trong menu long-press)
+
+**Yêu cầu:** khi đang xem phim, KHÔNG được có nút TẬP (và tên phim) hiển thị
+trực tiếp trên màn hình video; giao diện trình phát mặc định của iOS giữ
+nguyên; chức năng TẬP chỉ nằm trong MENU hiện ra khi **GIỮ (long press)** màn
+hình trình phát.
+
+**1. Trình phát GỐC iOS — `BinTV/Player/PhimNativePlayerController.swift`**
+- XOÁ `refreshEpisodesButton()` / `toggleEpisodePicker()` / `removeEpisodesButton()`
+  và thuộc tính `episodesButton`: trước đây controller tự vẽ một `UIButton`
+  "Tập" (nền hồng, góc phải trên) lên `contentOverlayView` của
+  `AVPlayerViewController` → nút TẬP đè cố định lên UI mặc định của iOS.
+- `AVPlayerViewController` giờ **100% mặc định** (chỉ còn `UILabel` phụ đề của
+  build 232 và panel danh sách tập khi được MỞ chủ động).
+- GIỮ NGUYÊN: `episodeItems` / `currentEpisodeIndex` (menu cần biết phim có
+  ≥2 tập để hiện nút TẬP), `requestEpisodePicker()` (điểm vào từ menu
+  long-press), `showEpisodePicker()` / `hideEpisodePicker()` / `pickEpisode()`,
+  `updateEpisodes(...)` + `onSelectEpisode` (đổi tập không thoát player),
+  gesture tua/đóng, phụ đề, luồng hết tập của build 233–236.
+- `updateEpisodes` thêm guard `episodeItems.count < 2 → hideEpisodePicker()`
+  (thay cho nhánh ẩn-nút cũ) để panel không bao giờ mở sót với phim lẻ.
+
+**2. Trình phát TÍCH HỢP (web) — `BinTV/Phim/Web/index.html` + `assets/app.js` + CSS**
+- Gỡ khỏi overlay player: `<div id="bintv-movie-player-title">` (TÊN PHIM) và
+  `<button id="bintv-movie-player-episodes-btn">Tập</button>` — cả trong
+  `index.html` lẫn template `player.innerHTML` mà `ensureMovieExperienceUI()`
+  tự dựng (nên KHÔNG còn "instance" nào khác sinh ra nút TẬP).
+- app.js: bỏ `wireMoviePlayerEpisodeButton()` / `refreshMoviePlayerEpisodeButton()`
+  và mọi chỗ ghi tên phim lên player (`startMoviePlayback`,
+  `movieLifecycleShowNativePlayerShell`); bỏ `.movie-player-episodes-btn` khỏi
+  `MOVIE_TOUCH_INTERACTIVE_SELECTOR`.
+- CSS: xoá rule `.movie-player-title` (style/landscape/phone) và
+  `.movie-player-episodes-btn` + `:active` (style) và rule `pointer-events`
+  (phim_ui). `.movie-player-overlay` / `.movie-player-status` / timeline /
+  phụ đề / double-tap GIỮ NGUYÊN.
+- GIỮ NGUYÊN `#bintv-movie-player-episodes` (dialog "Danh sách tập"),
+  `openMoviePlayerEpisodeMenu()`, `renderMoviePlayerEpisodeMenu()`,
+  `selectMoviePlayerEpisode()`, `syncNativeEpisodeList()` → chọn tập/chuyển tập
+  không đổi.
+
+**3. Điểm vào mới cho nút TẬP của menu long-press**
+- app.js export `window.__bintvOpenPlayerEpisodes()`: `false` khi player chưa
+  mở hoặc phim không có danh sách tập; `true` + mở dialog tập khi phim bộ
+  nhiều tập (gọi đúng `openMoviePlayerEpisodeMenu()` như nút cũ).
+- `PhimWebView.jsOpenEpisodeList` (Swift, dùng bởi `BinTVPlayerMenuContext`
+  `id: "phim-web"`) chuyển từ `.click()` nút DOM đã gỡ sang gọi
+  `window.__bintvOpenPlayerEpisodes()` (fallback `__bintvMoviePlaybackHooks.openPlayerEpisodes`).
+- Menu long-press (`GestureOverlayMenuView` / `BinTVPlayerMenuCenter`) KHÔNG đổi:
+  PHIM bộ → LIVE TV · TUBE · SETTING · TẬP · BACK; PHIM lẻ / LIVE TV / TUBE →
+  không có TẬP. Đóng menu KHÔNG tạo lại nút TẬP nổi nào (không còn code nào
+  vẽ nút).
+
+**Không đổi:** nguồn JSON phim, logic tải danh sách phim/tập, cơ chế phát
+video (ưu tiên trình phát tích hợp → fallback AVPlayer), double-tap, timeline,
+LIVE TV, TUBE, SETTING.
+
+**Kiểm chứng:** `cd tests/ios-native-handoff && npm test` → **237/237 PASS**
+(202 cũ, 2 check của SUITE G cập nhật theo điểm vào mới + **SUITE H** mới:
+index.html/app.js/CSS/Swift không còn nút TẬP & tên phim, native không
+`addSubview` nút cố định, menu vẫn có TẬP, runtime jsdom khẳng định overlay
+player không có `<button>` nào / không hiện tên phim (kể cả khi player được
+dựng lại), và gọi điểm vào TẬP vẫn mở đúng danh sách 3 tập — phim lẻ trả
+`false`). Compile Swift do GitHub Actions xác nhận.

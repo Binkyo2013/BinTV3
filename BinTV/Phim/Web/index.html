@@ -130,10 +130,14 @@
              bản Android chạy tốt — thuộc tính này bị Android bỏ qua. -->
         <video id="bintv-movie-html5-player" playsinline webkit-playsinline></video>
         <div id="bintv-movie-subtitle-text" class="movie-subtitle-text"></div>
+        <!-- [build 242 — 2026-09-15] Overlay của player KHÔNG còn TÊN PHIM
+             và NÚT "TẬP" (hai phần tử id bintv-movie-player-…-title /
+             …-episodes-btn đã bị xoá hẳn): trình phát chỉ giữ dòng trạng thái.
+             Danh sách tập (#bintv-movie-player-episodes bên dưới) vẫn còn
+             nguyên — nó được mở từ nút TẬP của MENU LONG-PRESS (Swift gọi
+             window.__bintvOpenPlayerEpisodes), không phải từ nút vẽ trên video. -->
         <div class="movie-player-overlay">
-            <div id="bintv-movie-player-title" class="movie-player-title"></div>
             <div id="bintv-movie-player-status" class="movie-player-status">Đang chuẩn bị phát…</div>
-            <button type="button" id="bintv-movie-player-episodes-btn" class="movie-player-episodes-btn" aria-label="Danh sách tập">Tập</button>
         </div>
         <div id="bintv-movie-seek-timeline" class="movie-seek-timeline" aria-hidden="true">
             <div class="movie-seek-timeline-times">
