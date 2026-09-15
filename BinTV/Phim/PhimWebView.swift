@@ -2418,24 +2418,3 @@ private struct PhimWebViewContainer: UIViewRepresentable {
         controller.injectStatusBarInsetPublic()
     }
 }
-ller?.webViewDidAttachToContainer()
-    }
-}
-
-private struct PhimWebViewContainer: UIViewRepresentable {
-    @ObservedObject var controller: PhimController
-    let onLongPress: () -> Void
-
-    func makeUIView(context: Context) -> PhimWebViewHost {
-        PhimWebViewHost(controller: controller)
-    }
-
-    func updateUIView(_ uiView: PhimWebViewHost, context: Context) {
-        // The host owns the constraints and can atomically swap a terminated
-        // WKWebView for the controller's replacement without rebuilding the
-        // surrounding SwiftUI tab hierarchy.
-        uiView.install(controller.webView)
-        controller.onLongPress = onLongPress
-        controller.injectStatusBarInsetPublic()
-    }
-}
