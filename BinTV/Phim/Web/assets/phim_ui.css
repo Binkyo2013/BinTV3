@@ -9,6 +9,10 @@
 
 #bintv-movie-player .movie-player-overlay {
     transition: opacity .25s ease, visibility 0s linear 0s;
+    pointer-events: none;
+}
+#bintv-movie-player .movie-player-episodes-btn {
+    pointer-events: auto;
 }
 #bintv-movie-player.phim-hud-hidden .movie-player-overlay {
     opacity: 0;

@@ -22,11 +22,9 @@
  *     MKV/AVI/FLV/WMV/RMVB/DIVX/MPG → native; MP4 + AC3/EAC3/DTS/TrueHD/
  *     Atmos → native; HLS → để web thử trước; không dính false-positive
  *     (đuôi nằm trong query, "dtsxtra", …).
- *   SUITE E (build 233 → 234) — KẾT THÚC PHÁT, PHIM BỘ / PHIM LẺ:
- *     BỘ còn tập: native/web hết tập → ĐÓNG TRÌNH PHÁT rồi TỰ ĐỘNG phát tập
- *     kế tiếp (build 234: không dừng ở màn hình chọn tập, không còn
- *     prepareNext giữ player); BỘ hết tập cuối → về CHỌN TẬP; LẺ hết → về
- *     lưới PHIM; Return của người dùng → huỷ lần tự chuyển tập đang chờ.
+ *   SUITE E (build 236) — KẾT THÚC PHÁT, PHIM BỘ / PHIM LẺ:
+ *     BỘ còn tập: hết tập → KHÔNG tự phát tập kế; giữ player + mở danh sách
+ *     tập trong player; BỘ hết tập cuối → về CHỌN TẬP; LẺ hết → về lưới PHIM.
  *   SUITE F (build 234) — ƯU TIÊN TRÌNH PHÁT + GESTURE ĐIỀU HƯỚNG:
  *     Ưu tiên 1 = trình phát TÍCH HỢP của app (thẻ <video>): nguồn MKV/AC3
  *     cũng KHÔNG được handoff sớm sang trình phát iOS; chỉ khi trình phát
@@ -607,51 +605,41 @@ function suiteE() {
     check("E", "native player có prepareNextEpisode()", /func prepareNextEpisode\(\)/.test(nativeSrcE));
 
     // --- E1: phim BỘ hết tập (native) còn tập --------------------------
-    // [build 234] Trình phát ĐÓNG ngay khi hết tập (action "stop"), sau đó
-    // tự động nạp & phát tập kế tiếp — KHÔNG giữ player mở (prepareNext),
-    // KHÔNG dừng ở màn hình chọn tập.
+    // [build 236] KHÔNG tự phát tập kế: giữ player, mở danh sách tập.
     const win1 = bootSeries(0);
     win1.__bintvMoviePlaybackHooks.setHandoffActive(true);
     win1.__bintvMoviePlaybackHooks.setPreferNative(true);
     win1.__posted.length = 0;
     win1.__bintvNativePlaybackEnded({});
     const posted1 = win1.__posted.map(function (m) { return m.action || "play"; });
-    check("E", "BỘ còn tập, native-ended → ĐÓNG trình phát iOS (action stop)",
-          posted1.indexOf("stop") >= 0, JSON.stringify(posted1));
-    check("E", "→ KHÔNG còn prepareNext (không giữ player mở nữa)",
-          posted1.indexOf("prepareNext") === -1, JSON.stringify(posted1));
+    check("E", "BỘ còn tập, native-ended → KHÔNG đóng player (không stop)",
+          posted1.indexOf("stop") === -1, JSON.stringify(posted1));
+    check("E", "→ báo prepareNext để native giữ player",
+          posted1.indexOf("prepareNext") >= 0, JSON.stringify(posted1));
     const st1 = win1.__bintvMoviePlaybackHooks.getState();
-    check("E", "→ bắt đầu tự chuyển tập (current 0→1, autoAdvance, switch chạy)",
-          st1.current === 1 && st1.autoAdvance === true && st1.switchInProgress === true,
+    check("E", "→ KHÔNG tự chuyển tập (current vẫn 0, autoAdvance=false)",
+          st1.current === 0 && st1.autoAdvance === false && st1.playerOpen === true,
           JSON.stringify(st1));
-    check("E", "→ cờ native đã hạ (tập kế phát bằng trình phát tích hợp)",
-          st1.preferNative === false && st1.handoffActive === false, JSON.stringify(st1));
-    check("E", "→ player web đã đóng trước khi nạp tập kế",
-          st1.playerOpen === false
-          && !win1.document.getElementById("bintv-movie-player").classList.contains("show"),
-          JSON.stringify(st1));
-    check("E", "→ KHÔNG dừng ở màn hình chọn tập (picker chưa mở)",
+    check("E", "→ danh sách tập trong player mở",
+          win1.document.getElementById("bintv-movie-player-episodes").classList.contains("show"));
+    check("E", "→ overlay chọn tập ngoài player KHÔNG mở",
           !win1.document.getElementById("bintv-movie-episodes").classList.contains("show"));
-    check("E", "→ trạng thái báo đang chuẩn bị/nạp tập tiếp theo",
-          /(tập tiếp theo|Đang tìm nguồn phát)/.test(
-              win1.document.getElementById("bintv-movie-status").textContent || ""),
-          win1.document.getElementById("bintv-movie-status").textContent);
 
-    // --- E2: phim BỘ hết tập CUỐI (native) → stop + về CHỌN TẬP ----------
+    // --- E2: phim BỘ hết tập CUỐI (native) → vẫn mở danh sách tập trong player
     const win2 = bootSeries(2);
     win2.__bintvMoviePlaybackHooks.setHandoffActive(true);
     win2.__bintvMoviePlaybackHooks.setPreferNative(true);
     win2.__posted.length = 0;
     win2.__bintvNativePlaybackEnded({});
     const posted2 = win2.__posted.map(function (m) { return m.action || "play"; });
-    check("E", "BỘ hết tập cuối, native-ended → gửi stop đóng player",
-          posted2.indexOf("stop") >= 0, JSON.stringify(posted2));
-    check("E", "→ overlay CHỌN TẬP mở lại", win2.document.getElementById("bintv-movie-episodes").classList.contains("show"));
-    check("E", "→ player web bị gỡ (show/player-active)",
-          !win2.document.getElementById("bintv-movie-player").classList.contains("show")
-          && !win2.document.getElementById("bintv-movie-browser").classList.contains("player-active"));
+    check("E", "BỘ hết tập cuối → KHÔNG tự đóng (không stop)",
+          posted2.indexOf("stop") === -1, JSON.stringify(posted2));
+    check("E", "→ danh sách tập trong player vẫn mở",
+          win2.document.getElementById("bintv-movie-player-episodes").classList.contains("show"));
+    check("E", "→ player web còn mở",
+          win2.document.getElementById("bintv-movie-player").classList.contains("show"));
     const st2 = win2.__bintvMoviePlaybackHooks.getState();
-    check("E", "→ cờ native/preference đã hạ", st2.handoffActive === false && st2.preferNative === false, JSON.stringify(st2));
+    check("E", "→ không auto-advance", st2.autoAdvance === false && st2.playerOpen === true, JSON.stringify(st2));
 
     // --- E3: phim LẺ hết phim (native) → stop, KHÔNG mở chọn tập ---------
     const win3 = makeWindow("http://127.0.0.1:3000/?android=phone&ios=landscape", true);
@@ -681,15 +669,15 @@ function suiteE() {
           win4.document.getElementById("bintv-movie-episodes").classList.contains("show"));
     check("E", "→ player web bị gỡ", !win4.document.getElementById("bintv-movie-player").classList.contains("show"));
 
-    // --- E5: đường WEB (<video>) — BỘ hết tập → tự chuyển ---------------
+    // --- E5: đường WEB (<video>) — BỘ hết tập → mở danh sách tập --------
     const win5 = bootSeries(0);
     win5.__posted.length = 0;
     win5.__bintvMoviePlaybackHooks.completed("html5-ended");
     const st5 = win5.__bintvMoviePlaybackHooks.getState();
-    check("E", "BỘ hết tập (web) → tự chuyển tập kế (current 0→1)",
-          st5.current === 1 && st5.switchInProgress === true, JSON.stringify(st5));
-    check("E", "→ KHÔNG gửi prepareNext/stop (không liên quan native)",
-          win5.__posted.length === 0, JSON.stringify(win5.__posted));
+    check("E", "BỘ hết tập (web) → KHÔNG tự chuyển tập (current vẫn 0)",
+          st5.current === 0 && st5.autoAdvance === false && st5.playerOpen === true, JSON.stringify(st5));
+    check("E", "→ danh sách tập trong player mở",
+          win5.document.getElementById("bintv-movie-player-episodes").classList.contains("show"));
 
     // --- E6: đường WEB — LẺ hết phim → đóng, về lưới PHIM ----------------
     const win6 = makeWindow("http://127.0.0.1:3000/?android=phone&ios=landscape", true);
@@ -711,20 +699,16 @@ function suiteE() {
     // KHÔNG được dập luồng tập kế cũng KHÔNG được mở lại màn hình chọn tập.
     const win7 = bootSeries(0);
     win7.__bintvMoviePlaybackHooks.setHandoffActive(true);
-    win7.__bintvNativePlaybackEnded({});        // bắt đầu tự chuyển tập (đang nạp nguồn)
-    check("E", "RACE: tự chuyển tập đã bắt đầu", win7.__bintvMoviePlaybackHooks.getState().autoAdvance === true);
-    win7.__bintvNativePlaybackClosed({});       // đóng đến muộn
+    win7.__bintvNativePlaybackEnded({});
+    check("E", "hết tập: player còn mở + danh sách tập",
+          win7.__bintvMoviePlaybackHooks.getState().playerOpen === true
+          && win7.document.getElementById("bintv-movie-player-episodes").classList.contains("show"));
+    win7.__bintvNativePlaybackClosed({});
     const st7 = win7.__bintvMoviePlaybackHooks.getState();
-    check("E", "RACE: đóng đến muộn → luồng tập kế KHÔNG bị dập",
-          st7.autoAdvance === true && st7.current === 1 && st7.playerOpen === false, JSON.stringify(st7));
-    check("E", "RACE: → KHÔNG mở lại CHỌN TẬP khi tập kế đang được nạp",
-          !win7.document.getElementById("bintv-movie-episodes").classList.contains("show"));
-    // Người dùng chủ động Return (vuốt cạnh trái) → huỷ lần tự chuyển tập.
-    check("E", "RACE: Return ở màn hình gốc PHIM → false (Swift lùi tab trước)",
-          win7.__bintvPhimReturn() === false);
-    const st7b = win7.__bintvMoviePlaybackHooks.getState();
-    check("E", "RACE: Return của người dùng → huỷ tự chuyển tập đang chờ",
-          st7b.autoAdvance === false && st7b.switchInProgress === false, JSON.stringify(st7b));
+    check("E", "đóng player sau khi hết tập → về overlay CHỌN TẬP",
+          win7.document.getElementById("bintv-movie-episodes").classList.contains("show")
+          && st7.playerOpen === false, JSON.stringify(st7));
+    check("E", "autoAdvance vẫn tắt", st7.autoAdvance === false, JSON.stringify(st7));
 
     // --- E9: Return của người dùng khi ĐANG phát (trình phát tích hợp) ---
     const win9 = bootSeries(1);
@@ -779,8 +763,9 @@ function suiteF() {
     win.__posted.length = 0;
     hooks.startPlayback("https://cdn.vnstream.xyz/f/movie.mkv", "Phim MKV AC3",
                         { name: "1080p AC3", stream: { name: "1080p AC3" } });
+    const playPosts = win.__posted.filter(function (m) { return m.action !== "episodes" && m.action !== "hideEpisodes"; });
     check("F", "nguồn MKV/AC3 → KHÔNG mở trình phát iOS ngay từ đầu",
-          win.__posted.length === 0, JSON.stringify(win.__posted));
+          playPosts.length === 0, JSON.stringify(win.__posted));
     const video = win.document.getElementById("bintv-movie-html5-player");
     check("F", "→ trình phát TÍCH HỢP (<video>) nhận nguồn",
           !!video && !!video.getAttribute("src"),
@@ -790,7 +775,9 @@ function suiteF() {
 
     // --- F2: trình phát tích hợp THẤT BẠI → lúc này mới fallback sang iOS -
     hooks.playbackError();
-    const handoff = win.__posted.filter(function (m) { return m.action !== "stop"; });
+    const handoff = win.__posted.filter(function (m) {
+        return m.action !== "stop" && m.action !== "episodes" && m.action !== "hideEpisodes";
+    });
     check("F", "tích hợp lỗi (hết nguồn web) → handoff sang trình phát iOS",
           handoff.length === 1, JSON.stringify(win.__posted));
     check("F", "→ reason = web-streams-exhausted",

@@ -1763,7 +1763,7 @@
     var MOVIE_TOUCH_REPEAT_INTERVAL = 260;
     var MOVIE_TOUCH_MOVE_SLOP = 30;
     var MOVIE_TOUCH_KEY_CODES = { ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Enter: 13 };
-    var MOVIE_TOUCH_INTERACTIVE_SELECTOR = ".jvhd-quality-option, .movie-subtitle-option, .movie-player-episode-option, button, a, input, select, textarea";
+    var MOVIE_TOUCH_INTERACTIVE_SELECTOR = ".jvhd-quality-option, .movie-subtitle-option, .movie-player-episode-option, .movie-player-episodes-btn, button, a, input, select, textarea";
     var movieTouchTracker = null;
     var movieTouchHintShown = false;
 
@@ -1948,11 +1948,63 @@
         if (!player) {
             player = document.createElement("div");
             player.id = "bintv-movie-player";
-            player.innerHTML = '<object id="bintv-movie-avplayer" type="application/avplayer"></object><video id="bintv-movie-html5-player"></video><div id="bintv-movie-subtitle-text" class="movie-subtitle-text"></div><div class="movie-player-overlay"><div id="bintv-movie-player-title" class="movie-player-title"></div><div id="bintv-movie-player-status" class="movie-player-status">Đang chuẩn bị phát…</div></div><div id="bintv-movie-seek-timeline" class="movie-seek-timeline" aria-hidden="true"><div class="movie-seek-timeline-times"><span id="bintv-movie-seek-current">00:00</span><span id="bintv-movie-seek-target">00:00</span><span id="bintv-movie-seek-duration">00:00</span></div><div class="movie-seek-timeline-track"><div id="bintv-movie-seek-progress" class="movie-seek-timeline-progress"></div><div id="bintv-movie-seek-thumb" class="movie-seek-timeline-thumb"></div></div></div><div id="bintv-movie-subtitle-menu" class="movie-subtitle-menu"><div class="movie-subtitle-dialog"><div class="movie-subtitle-title">Vietsub</div><div id="bintv-movie-subtitle-status" class="movie-subtitle-status">Đang tìm phụ đề…</div><div id="bintv-movie-subtitle-list" class="movie-subtitle-list"></div></div></div><div id="bintv-movie-player-episodes" class="movie-player-episodes"><div class="movie-player-episodes-dialog"><div class="movie-player-episodes-title">Danh sách tập</div><div id="bintv-movie-player-episodes-list" class="movie-player-episodes-list"></div></div></div>';
+            player.innerHTML = '<object id="bintv-movie-avplayer" type="application/avplayer"></object><video id="bintv-movie-html5-player"></video><div id="bintv-movie-subtitle-text" class="movie-subtitle-text"></div><div class="movie-player-overlay"><div id="bintv-movie-player-title" class="movie-player-title"></div><div id="bintv-movie-player-status" class="movie-player-status">Đang chuẩn bị phát…</div><button type="button" id="bintv-movie-player-episodes-btn" class="movie-player-episodes-btn" aria-label="Danh sách tập">Tập</button></div><div id="bintv-movie-seek-timeline" class="movie-seek-timeline" aria-hidden="true"><div class="movie-seek-timeline-times"><span id="bintv-movie-seek-current">00:00</span><span id="bintv-movie-seek-target">00:00</span><span id="bintv-movie-seek-duration">00:00</span></div><div class="movie-seek-timeline-track"><div id="bintv-movie-seek-progress" class="movie-seek-timeline-progress"></div><div id="bintv-movie-seek-thumb" class="movie-seek-timeline-thumb"></div></div></div><div id="bintv-movie-subtitle-menu" class="movie-subtitle-menu"><div class="movie-subtitle-dialog"><div class="movie-subtitle-title">Vietsub</div><div id="bintv-movie-subtitle-status" class="movie-subtitle-status">Đang tìm phụ đề…</div><div id="bintv-movie-subtitle-list" class="movie-subtitle-list"></div></div></div><div id="bintv-movie-player-episodes" class="movie-player-episodes"><div class="movie-player-episodes-dialog"><div class="movie-player-episodes-title">Danh sách tập</div><div id="bintv-movie-player-episodes-list" class="movie-player-episodes-list"></div></div></div>';
             document.body.appendChild(player);
         }
         // [BinTV TOUCH 2026-08] gắn điều khiển cảm ứng cho player (chạy 1 lần).
         setupMoviePlayerTouchControls(player);
+        wireMoviePlayerEpisodeButton(player);
+    }
+
+    function wireMoviePlayerEpisodeButton(player) {
+        var btn = document.getElementById("bintv-movie-player-episodes-btn");
+        if (!btn || btn.__bintvWired) return;
+        btn.__bintvWired = true;
+        btn.addEventListener("click", function (event) {
+            try { if (event && event.stopPropagation) event.stopPropagation(); } catch (e) {}
+            try { if (event && event.preventDefault) event.preventDefault(); } catch (e2) {}
+            openMoviePlayerEpisodeMenu();
+        });
+        refreshMoviePlayerEpisodeButton();
+    }
+
+    function hasInPlayerEpisodeList() {
+        return !!(movieEpisodes && movieEpisodes.length > 1 && movieEpisodeType === "series" && !jvhdPlayerSession);
+    }
+
+    function refreshMoviePlayerEpisodeButton() {
+        var btn = document.getElementById("bintv-movie-player-episodes-btn");
+        if (!btn) return;
+        var show = hasInPlayerEpisodeList() && moviePlayerOpen;
+        btn.style.display = show ? "inline-flex" : "none";
+        btn.setAttribute("aria-hidden", show ? "false" : "true");
+    }
+
+    function syncNativeEpisodeList(showPicker) {
+        try {
+            var bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.playVideoNative;
+            if (!bridge) return;
+            if (!hasInPlayerEpisodeList()) {
+                bridge.postMessage({ action: "episodes", items: [] });
+                return;
+            }
+            var items = [];
+            for (var i = 0; i < movieEpisodes.length; i++) {
+                var ep = movieEpisodes[i] || {};
+                items.push({
+                    id: String(ep.id || ""),
+                    title: String(ep.title || ("Tập " + (ep.episode || i + 1))),
+                    episode: ep.episode,
+                    season: ep.season
+                });
+            }
+            bridge.postMessage({
+                action: "episodes",
+                current: movieCurrentEpisodeIndex,
+                show: !!showPicker,
+                items: items
+            });
+        } catch (e) {}
     }
 
     function showMovieStatus(message, isError) {
@@ -5130,12 +5182,10 @@
         // JVHD (live/quảng cáo) có luồng kết thúc riêng — đóng native theo
         // đúng nghiệp vụ JVHD (closeJvhdPlayback → stopMoviePlayback gửi stop).
         if (jvhdPlayerSession) { handleJvhdPlaybackCompleted(); return; }
-        // [build 234] PHIM BỘ còn tập → tự chuyển tập: startMovieAutoAdvance
-        // đóng trình phát iOS (action "stop") rồi nạp & phát tập kế.
-        if (startMovieAutoAdvance("native-ended")) return;
-        // HẾT TẬP (phim bộ) hoặc PHIM LẺ: đóng trình phát ngay…
-        stopMoviePlayback();   // (handoffActive còn true → gửi "stop" cho native)
-        // …rồi quay về đúng giao diện: phim BỘ → CHỌN TẬP; phim LẺ → PHIM.
+        // [build 236] Hết tập: KHÔNG tự phát tập tiếp. Phim bộ → giữ player
+        // native + mở danh sách tập; phim lẻ / hết danh sách → đóng như cũ.
+        if (presentInPlayerEpisodeListAfterEnd("native-ended")) return;
+        stopMoviePlayback();
         if (movieEpisodes && movieEpisodes.length > 0 && movieEpisodeType === "series") reopenMovieEpisodePicker();
     };
 
@@ -6100,7 +6150,7 @@
         if (!moviePlayerOpen) return;
         cancelMovieScrubInteraction(true);
         hideMovieSeekTimelineImmediately();
-        if (!movieEpisodes || movieEpisodes.length === 0) {
+        if (!hasInPlayerEpisodeList()) {
             updateMoviePlayerStatus("Phim này không có danh sách tập");
             return;
         }
@@ -6109,12 +6159,18 @@
         var menu = document.getElementById("bintv-movie-player-episodes");
         if (menu) menu.classList.add("show");
         renderMoviePlayerEpisodeMenu();
+        syncNativeEpisodeList(true);
+        refreshMoviePlayerEpisodeButton();
     }
 
     function closeMoviePlayerEpisodeMenu() {
         moviePlayerEpisodeMenuOpen = false;
         var menu = document.getElementById("bintv-movie-player-episodes");
         if (menu) menu.classList.remove("show");
+        try {
+            var bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.playVideoNative;
+            if (bridge) bridge.postMessage({ action: "hideEpisodes" });
+        } catch (e) {}
     }
 
     function selectMoviePlayerEpisode() {
@@ -6197,6 +6253,9 @@
     // Trả về true khi luồng tự chuyển tập đã bắt đầu.
     // =================================================================
     function startMovieAutoAdvance(origin) {
+        // [build 236] Tắt tự phát tập kế — hết tập chỉ mở danh sách tập.
+        try { window.__phimDebug && window.__phimDebug.log("[PLAYER] auto-advance bị tắt (" + (origin || "") + ")"); } catch (e) {}
+        return false;
         if (movieAutoAdvanceActive) return false;
         if (!canPlayNextMovieEpisode()) return false;
         var nextIndex = movieCurrentEpisodeIndex + 1;
@@ -6281,13 +6340,27 @@
         if (jvhdPlayerSession) { handleJvhdPlaybackCompleted(); return; }
         if (movieTvPlaybackFallback) { handleMoviePlaybackError(); return; }
         try { window.__phimDebug && window.__phimDebug.log("[PLAYER] phát hết (" + (origin || "ended") + ")"); } catch (e) {}
-        // [build 234] PHIM BỘ còn tập: ĐÓNG TRÌNH PHÁT rồi TỰ ĐỘNG phát tập
-        // kế tiếp (không dừng ở màn hình chọn tập) — startMovieAutoAdvance.
-        if (startMovieAutoAdvance(origin || "ended")) return;
-        // Hết TẬP CUỐI (bộ) → đóng + về CHỌN TẬP.
-        // PHIM LẺ → đóng + về giao diện PHIM (lưới phim).
+        if (presentInPlayerEpisodeListAfterEnd(origin || "ended")) return;
         stopMoviePlayback();
         if (movieEpisodes && movieEpisodes.length > 0 && movieEpisodeType === "series") reopenMovieEpisodePicker();
+    }
+
+    // [build 236] Hết tập: KHÔNG tự phát tập kế. Giữ player, mở danh sách tập.
+    function presentInPlayerEpisodeListAfterEnd(origin) {
+        if (!hasInPlayerEpisodeList()) return false;
+        try { window.__phimDebug && window.__phimDebug.log("[PLAYER] hết tập — mở danh sách tập (" + (origin || "") + ")"); } catch (e) {}
+        cancelMovieAutoAdvance();
+        moviePlayerPaused = true;
+        try {
+            var video = document.getElementById("bintv-movie-html5-player");
+            if (video && !video.paused) video.pause();
+        } catch (e) {}
+        if (movieNativeHandoffActive) {
+            try { window.__bintvPrepareNextNativeEpisode && window.__bintvPrepareNextNativeEpisode(); } catch (e2) {}
+        }
+        updateMoviePlayerStatus("Đã phát xong tập này · chọn tập tiếp theo");
+        openMoviePlayerEpisodeMenu();
+        return true;
     }
 
     // Hook cho test jsdom (tests/ios-native-handoff) kiểm tra luồng kết thúc
@@ -6330,7 +6403,22 @@
         startPlayback: function (url, title, context) { startMoviePlayback(url, title, context); },
         playbackError: handleMoviePlaybackError,
         autoAdvance: startMovieAutoAdvance,
+        openPlayerEpisodes: openMoviePlayerEpisodeMenu,
+        hasEpisodeList: hasInPlayerEpisodeList,
         pushUiState: function () { pushMovieIosUiState(true); }
+    };
+
+    window.__bintvNativeSelectEpisode = function (info) {
+        var index = -1;
+        if (info && typeof info.index === "number") index = info.index;
+        else if (info && info.id) {
+            for (var i = 0; i < movieEpisodes.length; i++) {
+                if (movieEpisodes[i] && String(movieEpisodes[i].id) === String(info.id)) { index = i; break; }
+            }
+        }
+        if (index < 0 || index >= movieEpisodes.length) return;
+        moviePlayerEpisodeIndex = index;
+        selectMoviePlayerEpisode();
     };
 
     // =================================================================
@@ -6537,6 +6625,8 @@
         syncMoviePlaybackClock(0, false);
         hideMovieSeekTimelineImmediately();
         moviePlayerEpisodeSwitchInProgress = false;
+        refreshMoviePlayerEpisodeButton();
+        syncNativeEpisodeList(false);
 
         var browser = document.getElementById("bintv-movie-browser");
         var player = document.getElementById("bintv-movie-player");

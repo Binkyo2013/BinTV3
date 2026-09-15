@@ -1160,6 +1160,14 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
             ])
         }
         // [build 233] Native phát HẾT tập/phim → JS quyết định next-tập / đóng.
+        nativePlayer.onSelectEpisode = { [weak self] index, episodeId in
+            PhimDebugLog.step("BRIDGE", "nativeSelectEpisode→JS", "ok",
+                              "index=\(index) id=\(episodeId)")
+            self?.notifyWebApp(function: "__bintvNativeSelectEpisode", payload: [
+                "index": index,
+                "id": episodeId
+            ])
+        }
         nativePlayer.onEnded = { [weak self] request in
             PhimDebugLog.step("BRIDGE", "nativeEnded→JS", "ok",
                               "session=\(request.session) title=\(request.logTitle)")
@@ -2368,6 +2376,27 @@ private final class PhimWebViewHost: UIView {
         guard bounds.size != lastReportedSize else { return }
         lastReportedSize = bounds.size
         controller?.webViewDidAttachToContainer()
+    }
+}
+
+private struct PhimWebViewContainer: UIViewRepresentable {
+    @ObservedObject var controller: PhimController
+    let onLongPress: () -> Void
+
+    func makeUIView(context: Context) -> PhimWebViewHost {
+        PhimWebViewHost(controller: controller)
+    }
+
+    func updateUIView(_ uiView: PhimWebViewHost, context: Context) {
+        // The host owns the constraints and can atomically swap a terminated
+        // WKWebView for the controller's replacement without rebuilding the
+        // surrounding SwiftUI tab hierarchy.
+        uiView.install(controller.webView)
+        controller.onLongPress = onLongPress
+        controller.injectStatusBarInsetPublic()
+    }
+}
+ller?.webViewDidAttachToContainer()
     }
 }
 
