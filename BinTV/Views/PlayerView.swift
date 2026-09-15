@@ -15,6 +15,10 @@ import UIKit
 struct PlayerView: View {
     let channel: Channel
     @StateObject private var manager = AVPlayerManager()
+    /// [build 235] Long-press trong sheet player = BACK 1 bước → đóng sheet
+    /// (về lưới kênh LIVE TV). `dismiss()` của SwiftUI chỉ đóng sheet NÀY —
+    /// không thể thoát app hay về Home.
+    @Environment(\.dismiss) private var dismiss
     /// [build 224] Toàn màn hình player native — mức cao nhất của pinch
     /// PHÓNG TO (FIT → FILL → FULL). Dùng chung một AVPlayer nên
     /// chuyển chế độ KHÔNG tải lại stream, không gián đoạn.
@@ -41,7 +45,12 @@ struct PlayerView: View {
                                       isNativeFullscreen = true
                                       setInterfaceLandscape(true)
                                   },
-                                  onRequestExitFullscreen: { })
+                                  onRequestExitFullscreen: { },
+                                  onLongPressBack: {
+                                      // [build 235] Giữ màn hình trong player
+                                      // inline (sheet) = BACK → đóng sheet.
+                                      dismiss()
+                                  })
 
                 if case .loading = manager.state {
                     overlay {
@@ -93,7 +102,13 @@ struct PlayerView: View {
                               isFullscreen: true,
                               onGravityChanged: { manager.setGravity($0) },
                               onRequestFullscreen: { },
-                              onRequestExitFullscreen: { isNativeFullscreen = false })
+                              onRequestExitFullscreen: { isNativeFullscreen = false },
+                              onLongPressBack: {
+                                  // [build 235] Giữ màn hình ở mức FULL
+                                  // (fullScreenCover) = BACK 1 bước → thoát
+                                  // về player inline (KHÔNG đóng sheet).
+                                  isNativeFullscreen = false
+                              })
                 .ignoresSafeArea()
                 .background(Color.black.ignoresSafeArea())
         }
@@ -204,13 +219,17 @@ private struct BinTVNativePlayer: UIViewControllerRepresentable {
     let onGravityChanged: (AVLayerVideoGravity) -> Void
     let onRequestFullscreen: () -> Void
     let onRequestExitFullscreen: () -> Void
+    /// [build 235] Giữ màn hình ≥0.35s trong player = BACK 1 bước
+    /// (đóng sheet / thoát fullscreen cover — tuỳ vị trí của caller).
+    let onLongPressBack: () -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(gravity: gravity,
                     isFullscreen: isFullscreen,
                     onGravityChanged: onGravityChanged,
                     onRequestFullscreen: onRequestFullscreen,
-                    onRequestExitFullscreen: onRequestExitFullscreen)
+                    onRequestExitFullscreen: onRequestExitFullscreen,
+                    onLongPressBack: onLongPressBack)
     }
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
@@ -226,6 +245,19 @@ private struct BinTVNativePlayer: UIViewControllerRepresentable {
         pinch.cancelsTouchesInView = false
         pinch.delegate = context.coordinator
         controller.view.addGestureRecognizer(pinch)
+        // [build 235] GIỮ MÀN HÌNH = BACK 1 BƯỚC (giống nút Back Android TV):
+        // • player inline trong sheet LIVE TV  → đóng sheet (về lưới kênh);
+        // • player trong fullScreenCover (FULL) → thoát cover (về inline).
+        // Gắn TRÊN view của AVPlayerViewController → nhận touch vùng video;
+        // delegate NHƯỜNG UIControls (nút Done/AirPlay/seek...) để điều
+        // khiển gốc của AVKit GIỮ NGUYÊN 100%.
+        let backPress = UILongPressGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleBackLongPress(_:)))
+        backPress.minimumPressDuration = 0.35
+        backPress.delaysTouchesBegan = false
+        backPress.delegate = context.coordinator
+        controller.view.addGestureRecognizer(backPress)
         return controller
     }
 
@@ -248,7 +280,8 @@ private struct BinTVNativePlayer: UIViewControllerRepresentable {
                                    isFullscreen: isFullscreen,
                                    onGravityChanged: onGravityChanged,
                                    onRequestFullscreen: onRequestFullscreen,
-                                   onRequestExitFullscreen: onRequestExitFullscreen)
+                                   onRequestExitFullscreen: onRequestExitFullscreen,
+                                   onLongPressBack: onLongPressBack)
     }
 
     /// Giữ player sống sót qua các lần render/fullscreen: KHÔNG tháo
@@ -266,6 +299,8 @@ private struct BinTVNativePlayer: UIViewControllerRepresentable {
         private var onGravityChanged: (AVLayerVideoGravity) -> Void
         private var onRequestFullscreen: () -> Void
         private var onRequestExitFullscreen: () -> Void
+        /// [build 235] Back 1 bước khi giữ màn hình (đóng sheet / thoát FULL).
+        private var onLongPressBack: () -> Void
 
         /// Đang phát trước khi bắt đầu chuyển? (AVKit sẽ pause trong lúc
         /// chuyển → dùng để khôi phục đúng trạng thái sau transition).
@@ -278,12 +313,14 @@ private struct BinTVNativePlayer: UIViewControllerRepresentable {
              isFullscreen: Bool,
              onGravityChanged: @escaping (AVLayerVideoGravity) -> Void,
              onRequestFullscreen: @escaping () -> Void,
-             onRequestExitFullscreen: @escaping () -> Void) {
+             onRequestExitFullscreen: @escaping () -> Void,
+             onLongPressBack: @escaping () -> Void) {
             self.gravity = gravity
             self.isFullscreen = isFullscreen
             self.onGravityChanged = onGravityChanged
             self.onRequestFullscreen = onRequestFullscreen
             self.onRequestExitFullscreen = onRequestExitFullscreen
+            self.onLongPressBack = onLongPressBack
             super.init()
         }
 
@@ -291,12 +328,14 @@ private struct BinTVNativePlayer: UIViewControllerRepresentable {
                     isFullscreen: Bool,
                     onGravityChanged: @escaping (AVLayerVideoGravity) -> Void,
                     onRequestFullscreen: @escaping () -> Void,
-                    onRequestExitFullscreen: @escaping () -> Void) {
+                    onRequestExitFullscreen: @escaping () -> Void,
+                    onLongPressBack: @escaping () -> Void) {
             self.gravity = gravity
             self.isFullscreen = isFullscreen
             self.onGravityChanged = onGravityChanged
             self.onRequestFullscreen = onRequestFullscreen
             self.onRequestExitFullscreen = onRequestExitFullscreen
+            self.onLongPressBack = onLongPressBack
         }
 
         // MARK: - Pinch 2 ngón: FIT → FILL → FULL (và ngược lại)
@@ -332,6 +371,39 @@ private struct BinTVNativePlayer: UIViewControllerRepresentable {
             } else if gravity == .resizeAspectFill {
                 onGravityChanged(.resizeAspect)          // FILL → FIT
             }
+        }
+
+        /// [build 235] Giữ màn hình ≥0.35s trong player = BACK 1 bước:
+        /// đóng sheet (inline) hoặc thoát fullscreen cover (FULL) — KHÔNG
+        /// thoát app, KHÔNG về Home. Giống nút Back trên Android TV.
+        @objc func handleBackLongPress(_ gesture: UILongPressGestureRecognizer) {
+            guard gesture.state == .began else { return }
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            onLongPressBack()
+        }
+
+        /// Long-press BACK: NHƯỜNG UIControl / ô nhập liệu (điều khiển gốc
+        /// của AVKit: nút Done, AirPlay, seek, PiP...) → chỉ nhận ở vùng
+        /// video/nền, không cướp thao tác player hiện có.
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldReceive touch: UITouch) -> Bool {
+            if gestureRecognizer is UILongPressGestureRecognizer,
+               Self.isControlOrTextInput(touch.view) {
+                return false
+            }
+            return true
+        }
+
+        /// Touch có nằm trong UIControl hoặc ô nhập liệu không (chained
+        /// qua superview — điều khiển AVKit là nút overlay trong view của
+        /// AVPlayerViewController).
+        private static func isControlOrTextInput(_ view: UIView?) -> Bool {
+            var current = view
+            while let candidate = current {
+                if candidate is UIControl || candidate is UITextInput { return true }
+                current = candidate.superview
+            }
+            return false
         }
 
         /// KHÔNG cướp gesture của AVKit / của SwiftUI (pinch vẫn thuộc về
