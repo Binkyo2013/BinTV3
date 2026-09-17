@@ -1,11 +1,11 @@
 # BinTV iOS — TrollStore Build (FIXED)
 
-> **Bản mới nhất: 2.5.9 (build 243)** — **MODULE PHIM CHỈ DÙNG MỘT TRÌNH
+> **Bản mới nhất: 2.5.10 (build 244)** — **MODULE PHIM CHỈ DÙNG MỘT TRÌNH
 > PHÁT** do người dùng chọn ở **SETTING → "Trình phát PHIM"** (lưu
 > UserDefaults): chưa chọn thì KHÔNG nạp player nào mà chuyển sang SETTING,
 > chọn xong tự quay lại PHIM và phát tiếp đúng phim/tập vừa chọn; từ đó chỉ
 > trình phát được chọn mới tải video (hết cảnh 2 player cùng load 1 URL).
-> Chi tiết: mục `### Build 243 (2.5.9)` ở cuối file · Cách lấy file:
+> Chi tiết: mục `### Build 244 (2.5.10)` ở cuối file · Cách lấy file:
 > artifact `BinTV-trollstore-unsigned` (chứa `BinTV.ipa`) của workflow
 > "Build unsigned IPA (TrollStore)".
 
@@ -723,6 +723,12 @@ index.html/app.js/CSS/Swift không còn nút TẬP & tên phim, native không
 player không có `<button>` nào / không hiện tên phim (kể cả khi player được
 dựng lại), và gọi điểm vào TẬP vẫn mở đúng danh sách 3 tập — phim lẻ trả
 `false`). Compile Swift do GitHub Actions xác nhận.
+
+### Build 244 (2.5.10) — Cập nhật version và build number
+
+- Cập nhật `CFBundleShortVersionString` / `MARKETING_VERSION` lên **2.5.10**.
+- Cập nhật `CFBundleVersion` / `CURRENT_PROJECT_VERSION` lên **244** cho cả Debug và Release.
+- Không thay đổi logic ứng dụng; bản build này dùng chung toàn bộ tính năng PHIM của build 243.
 
 ### Build 243 (2.5.9) — PHIM chỉ dùng MỘT trình phát do người dùng chọn (SETTING → "Trình phát PHIM")
 
