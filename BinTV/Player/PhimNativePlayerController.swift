@@ -252,15 +252,20 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
                 let target = max(0, seconds)
                 let wasPlaying = player.rate > 0
                 let time = CMTime(seconds: target, preferredTimescale: 600)
+                let generation = self.lifecycleGeneration
+                let item = player.currentItem
                 player.seek(to: time,
                             toleranceBefore: CMTime(seconds: 0.25, preferredTimescale: 600),
                             toleranceAfter: CMTime(seconds: 0.25, preferredTimescale: 600)) { _ in
                     // Chỉ tự phát lại nếu TRƯỚC ĐÓ đang phát (người dùng đang
                     // tạm dừng thì tua xong vẫn tạm dừng).
-                    guard wasPlaying, !self.waitingForNextInstruction else { return }
+                    guard wasPlaying, !self.waitingForNextInstruction,
+                          !self.lifecycleIsSuspended,
+                          self.lifecycleGeneration == generation,
+                          UIApplication.shared.applicationState == .active,
+                          self.player === player, player.currentItem === item else { return }
                     player.play()
                 }
-                self.lifecycleResumePosition = time
                 PhimDebugLog.step("GESTURE", "nativeSeek", "go",
                                   "target=\(Int(target.rounded()))s wasPlaying=\(wasPlaying)")
             },
