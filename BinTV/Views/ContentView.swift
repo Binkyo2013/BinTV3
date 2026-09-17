@@ -510,12 +510,35 @@ final class BinTVPlayerGestureHub {
     static let shared = BinTVPlayerGestureHub()
     private var contexts: [BinTVPlayerGestureContext] = []
     private let lock = NSLock()
+    /// [build 245 — 2026-09-17] Overlay "chiếm trọn cảm ứng" của trình phát
+    /// đang MỞ (hiện tại: danh sách TẬP của player PHIM — xem
+    /// PhimNativePlayerController.showEpisodePicker). Khi cờ này bật, các
+    /// recognizer VUỐT CẠNH (tua/Return/menu) tạm NHƯỜNG để mọi thao tác
+    /// trong vùng danh sách chỉ chạy cuộn/chọn tập — KHÔNG bao giờ xuyên
+    /// xuống thanh tua video bên dưới. Long-press vẫn hoạt động (menu →
+    /// BACK là đường đóng danh sách tập hiện hành).
+    private var playerOverlayPresented = false
 
     /// Đăng ký (ghi đè theo tên — idempotent khi controller init lại).
     func register(_ context: BinTVPlayerGestureContext) {
         lock.lock(); defer { lock.unlock() }
         contexts.removeAll { $0.name == context.name }
         contexts.append(context)
+    }
+
+    /// [build 245] Trình phát mở/đóng overlay chiếm trọn cảm ứng (danh sách
+    /// TẬP). Gọi trên main thread từ chính trình phát (show = true trước khi
+    /// panel nhận touch, false ngay khi panel được gỡ).
+    func setPlayerOverlayPresented(_ presented: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        playerOverlayPresented = presented
+    }
+
+    /// [build 245] Overlay danh sách tập đang mở? (delegate vuốt cạnh đọc để
+    /// tạm nhường — xem BinTVWindowGestures.Coordinator.shouldReceive).
+    var isPlayerOverlayPresented: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return playerOverlayPresented
     }
 
     /// Ngữ cảnh đang hoạt động — ưu tiên trình phát iOS (lớp phủ trên cùng).
@@ -991,6 +1014,13 @@ private struct BinTVWindowGestures: UIViewControllerRepresentable {
                 return true
             }
             if gestureRecognizer is BinTVEdgeSwipeRecognizer {
+                // [build 245] Danh sách TẬP của trình phát PHIM đang MỞ: panel
+                // nằm lớp trên cùng đã chặn hit-test, nhưng recognizer vuốt cạnh
+                // gắn trên UIWindow vẫn thấy mọi touch — tạm NHƯỜNG (không tua /
+                // không Return / không menu) để vùng danh sách được ưu tiên tuyệt
+                // đối, đúng yêu cầu "vuốt danh sách TẬP không làm tua video".
+                // Đóng danh sách → hideEpisodePicker() hạ cờ → vuốt hoạt động lại.
+                if BinTVPlayerGestureHub.shared.isPlayerOverlayPresented { return false }
                 // Webview có swipe back/forward nội bộ (TUBE:
                 // allowsBackForwardNavigationGestures = true) → nhường để
                 // KHÔNG bị Back/Next 2 lần cho cùng một cái vuốt.

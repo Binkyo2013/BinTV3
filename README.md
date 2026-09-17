@@ -1,11 +1,12 @@
 # BinTV iOS — TrollStore Build (FIXED)
 
-> **Bản mới nhất: 2.5.10 (build 244)** — **MODULE PHIM CHỈ DÙNG MỘT TRÌNH
-> PHÁT** do người dùng chọn ở **SETTING → "Trình phát PHIM"** (lưu
-> UserDefaults): chưa chọn thì KHÔNG nạp player nào mà chuyển sang SETTING,
-> chọn xong tự quay lại PHIM và phát tiếp đúng phim/tập vừa chọn; từ đó chỉ
-> trình phát được chọn mới tải video (hết cảnh 2 player cùng load 1 URL).
-> Chi tiết: mục `### Build 244 (2.5.10)` ở cuối file · Cách lấy file:
+> **Bản mới nhất: 2.5.11 (build 245)** — **DANH SÁCH TẬP NẰM LỚP TRÊN CÙNG
+> CỦA TRÌNH PHÁT**: trong trình phát PHIM, giữ màn hình → TẬP → danh sách
+> tập (dạng DỌC) hiển thị TRÊN cả progress/seek bar lẫn mọi control, nhận
+> TOÀN BỘ cảm ứng trong vùng của nó: vuốt LÊN/XUỐNG chỉ cuộn danh sách,
+> KHÔNG còn bị progress bar bắt gesture thành tua video; đóng/chọn tập xong
+> seek bar hoạt động lại như cũ. Mọi chức năng khác giữ nguyên 100%.
+> Chi tiết: mục `### Build 245 (2.5.11)` ở cuối file · Cách lấy file:
 > artifact `BinTV-trollstore-unsigned` (chứa `BinTV.ipa`) của workflow
 > "Build unsigned IPA (TrollStore)".
 
@@ -723,6 +724,48 @@ index.html/app.js/CSS/Swift không còn nút TẬP & tên phim, native không
 player không có `<button>` nào / không hiện tên phim (kể cả khi player được
 dựng lại), và gọi điểm vào TẬP vẫn mở đúng danh sách 3 tập — phim lẻ trả
 `false`). Compile Swift do GitHub Actions xác nhận.
+
+### Build 245 (2.5.11) — Danh sách TẬP nằm lớp TRÊN CÙNG của trình phát, không đụng progress/seek bar
+
+**Vấn đề (đúng triệu chứng):** trong trình phát PHIM, giữ màn hình → chọn
+TẬP → danh sách tập hiện ra nhưng BỊ progress/seek bar đè lên: panel được
+treo vào `contentOverlayView` — lớp mà `AVPlayerViewController` đặt NẰM DƯỚI
+thanh điều khiển tích hợp (transport bar chứa scrubber). Panel neo ở đáy
+màn hình nên nằm đúng vùng thanh trượt tua → vuốt cuộn danh sách bị
+hit-test giao cho scrubber TRƯỚC → hệ thống hiểu nhầm thành tua video,
+không thể cuộn/chọn tập chính xác.
+
+**Cách sửa (tối thiểu, đúng nguyên nhân — chỉ `PhimNativePlayerController`
++ cờ ưu tiên gesture trong `ContentView`, KHÔNG đụng LIVE TV/TUBE/SETTING,
+không đổi luồng chọn phim/tập/nguồn/trình phát):**
+
+1. **Lớp hiển thị trên cùng:** `showEpisodePicker()` nay treo panel vào
+   VIEW GỐC của `AVPlayerViewController` (`playerController.view`) +
+   `bringSubviewToFront` + `layer.zPosition` cao → panel nằm TRÊN video,
+   progress/seek bar và mọi control về cả hiển thị, z-order lẫn hit-testing
+   (panel là view ĐẦU TIÊN nhận touch trong vùng của nó).
+2. **Danh sách DỌC, vuốt LÊN/XUỐNG để cuộn:** `UIStackView` trục dọc trong
+   `UIScrollView` cuộn dọc (`alwaysBounceVertical`), cao tối đa 50% màn
+   hình — đúng giao diện yêu cầu (Tập 1…Tập N xếp chồng).
+3. **Ưu tiên cảm ứng tuyệt đối khi danh sách mở:** cờ
+   `BinTVPlayerGestureHub.setPlayerOverlayPresented` — recognizer VUỐT CẠNH
+   trên UIWindow (tua/Return/menu) tạm NHƯỜNG để không thao tác nào xuyên
+   xuống thanh tua bên dưới; long-press vẫn hoạt động (menu → BACK đóng
+   danh sách đúng một lớp như cũ).
+4. **Đóng sạch, không overlay vô hình:** `hideEpisodePicker()` gỡ panel khỏi
+   hierarchy + hạ cờ (seek bar nhận lại thao tác tua); `teardownCurrentItem()`
+   cũng gọi hide — không bao giờ sót panel khi dừng/đổi nguồn/đóng player.
+5. **Giữ nguyên 100%:** nút TẬP vẫn chỉ mở từ menu long-press; chạm tập →
+   `pickEpisode` → `onSelectEpisode` về JS phát tập đã chọn; mở danh sách vẫn
+   tạm dừng video; BACK vẫn ưu tiên đóng danh sách trước; phụ đề vẫn trên
+   `contentOverlayView`.
+
+**Kiểm chứng:** `cd tests/ios-native-handoff && npm test` → **291/291 PASS**
+(274 cũ + cập nhật 1 check SUITE H theo chỗ treo panel mới + **SUITE J** mới
+17 check: panel trên view gốc + bringSubviewToFront/zPosition, danh sách dọc
+cuộn dọc, hub cờ ưu tiên + delegate vuốt cạnh nhường, teardown/đóng picker
+gỡ sạch, và regression toàn bộ luồng TẬP/chọn tập/phụ đề). Compile Swift do
+GitHub Actions xác nhận.
 
 ### Build 244 (2.5.10) — Cập nhật version và build number
 

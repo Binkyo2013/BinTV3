@@ -42,6 +42,13 @@
  *     chọn xong → phát tiếp ĐÚNG phim/tập vừa chọn; đã chọn "native" → chỉ
  *     AVPlayer nhận URL (thẻ <video> không bao giờ có src); đã chọn
  *     "integrated" → chỉ <video> nhận URL; ngoài WKWebView iOS → hành vi cũ.
+ *   SUITE J (build 245) — DANH SÁCH TẬP = LỚP TRÊN CÙNG CỦA TRÌNH PHÁT:
+ *     panel danh sách tập treo trên VIEW GỐC của AVPlayerViewController
+ *     (KHÔNG phải contentOverlayView — lớp đó nằm DƯỚI progress/seek bar),
+ *     bringSubviewToFront + zPosition cao; danh sách DỌC cuộn LÊN/XUỐNG;
+ *     gesture hub nhường vuốt cạnh khi danh sách mở; teardown/đóng picker gỡ
+ *     panel sạch (seek bar hoạt động lại); luồng TẬP (menu long-press →
+ *     pickEpisode → JS) giữ nguyên 100%.
  *
  * Các hàm của SUITE B được TRÍCH TRỰC TIẾP từ app.js (không chép tay) nên
  * test luôn bám theo code thật.
@@ -1088,8 +1095,11 @@ function suiteH() {
           !/func refreshEpisodesButton/.test(nativeSrc)
           && !/func toggleEpisodePicker/.test(nativeSrc)
           && !/func removeEpisodesButton/.test(nativeSrc));
-    check("H", "Swift native KHÔNG thêm subview cố định nào khác vào contentOverlayView ngoài phụ đề/panel tập",
-          (nativeSrc.match(/overlay\.addSubview\(/g) || []).length === 2);
+    // [build 245] panel danh sách tập đã CHUYỂN LÊN view gốc của trình phát
+    // (lớp trên cùng, trên cả progress/seek bar — xem SUITE J); contentOverlayView
+    // từ build này CHỈ còn treo phụ đề.
+    check("H", "Swift native KHÔNG thêm subview cố định nào khác vào contentOverlayView ngoài phụ đề",
+          (nativeSrc.match(/overlay\.addSubview\(/g) || []).length === 1);
     check("H", "Swift native VẪN giữ panel danh sách tập + điểm vào từ menu",
           /func requestEpisodePicker\(\)/.test(nativeSrc)
           && /private func showEpisodePicker\(\)/.test(nativeSrc)
@@ -1353,6 +1363,86 @@ function suiteI() {
           /movieUserChoseIntegratedPlayer\(\)/.test(appSrc));
 }
 
+// =====================================================================
+// SUITE J (build 245) — DANH SÁCH TẬP NẰM LỚP TRÊN CÙNG, KHÔNG ĐỤNG SEEK BAR
+// ---------------------------------------------------------------------
+// Yêu cầu: trong trình phát PHIM, giữ màn hình → TẬP → danh sách tập phải
+// ở LỚP TRÊN CÙNG (trên progress/seek bar + mọi control), nhận TOÀN BỘ cảm
+// ứng trong vùng của nó: vuốt lên/xuống CHỈ cuộn danh sách, KHÔNG làm tua
+// video; đóng/chọn tập xong → seek bar nhận lại thao tác như cũ (không để
+// overlay vô hình chặn touch). Chỉ thay đổi lớp hiển thị + ưu tiên touch,
+// KHÔNG đổi luồng mở/chọn tập (menu long-press → TẬP → pickEpisode → JS).
+// =====================================================================
+function suiteJ() {
+    console.log("\n=== SUITE J (build 245): danh sách TẬP lớp trên cùng, ưu tiên cảm ứng ===");
+    const nativeSrc = fs.readFileSync(path.join(REPO, "BinTV", "Player", "PhimNativePlayerController.swift"), "utf8");
+    const contentSrc = fs.readFileSync(path.join(REPO, "BinTV", "Views", "ContentView.swift"), "utf8");
+
+    // Cắt thân một hàm: từ startMarker tới endMarker (để assert ĐÚNG trong
+    // hàm cần kiểm tra, không bắt nhầm chỗ khác của file).
+    function body(src, startMarker, endMarker) {
+        const s = src.indexOf(startMarker);
+        if (s === -1) return "";
+        const e = endMarker ? src.indexOf(endMarker, s + startMarker.length) : -1;
+        return src.slice(s, e === -1 ? undefined : e);
+    }
+    const showBody = body(nativeSrc, "private func showEpisodePicker()", "@objc private func pickEpisode");
+    const hideBody = body(nativeSrc, "private func hideEpisodePicker()", "private func removeSubtitleOverlay");
+    const teardownBody = body(nativeSrc, "private func teardownCurrentItem()", "private func removeStallObserver");
+    // Bản CHỈ-CODE (bỏ chú thích //…) để assert hành vi, không bắt chữ trong comment.
+    const showCode = showBody.replace(/\/\/[^\n]*/g, "");
+
+    // --- J1: panel ở LỚP TRÊN CÙNG của trình phát ----------------------
+    check("J", "showEpisodePicker treo panel vào VIEW GỐC của trình phát (không phải contentOverlayView)",
+          /playerController\?\.view/.test(showCode) && showCode.indexOf("contentOverlayView") === -1);
+    check("J", "showEpisodePicker đưa panel lên ĐỈNH (bringSubviewToFront) + zPosition cao",
+          /bringSubviewToFront\(panel\)/.test(showBody) && /panel\.layer\.zPosition\s*=\s*9\d\d/.test(showBody));
+    check("J", "showEpisodePicker NÂNG CỜ ưu tiên cảm ứng cho gesture hub",
+          /BinTVPlayerGestureHub\.shared\.setPlayerOverlayPresented\(true\)/.test(showBody));
+
+    // --- J2: danh sách DỌC, vuốt LÊN/XUỐNG để cuộn ----------------------
+    check("J", "danh sách tập dạng DỌC (UIStackView axis = .vertical)",
+          /rowStack\.axis\s*=\s*\.vertical/.test(showBody));
+    check("J", "scroll view cuộn DỌC (alwaysBounceVertical + content/frame layout guide)",
+          /alwaysBounceVertical\s*=\s*true/.test(showBody)
+          && /scroll\.contentLayoutGuide/.test(showBody)
+          && /scroll\.frameLayoutGuide/.test(showBody));
+    check("J", "KHÔNG còn danh sách ngang một dòng cao 56pt (rowStack .horizontal / heightAnchor 56)",
+          showBody.indexOf("rowStack.axis = .horizontal") === -1
+          && !/equalToConstant:\s*56\)/.test(showBody));
+
+    // --- J3: gesture hub + delegate vuốt cạnh nhường danh sách tập ------
+    check("J", "BinTVPlayerGestureHub có cờ overlay (set/isPlayerOverlayPresented)",
+          /func setPlayerOverlayPresented\(_ presented: Bool\)/.test(contentSrc)
+          && /var isPlayerOverlayPresented: Bool/.test(contentSrc));
+    check("J", "delegate vuốt cạnh (BinTVEdgeSwipeRecognizer) NHƯỜNG khi danh sách tập mở",
+          /if gestureRecognizer is BinTVEdgeSwipeRecognizer \{[\s\S]*?BinTVPlayerGestureHub\.shared\.isPlayerOverlayPresented \{ return false \}/.test(contentSrc));
+
+    // --- J4: đóng/chọn tập → dọn SẠCH, seek bar hoạt động lại ----------
+    check("J", "hideEpisodePicker gỡ panel khỏi hierarchy + HẠ CỜ ưu tiên cảm ứng",
+          /removeFromSuperview\(\)/.test(hideBody)
+          && /BinTVPlayerGestureHub\.shared\.setPlayerOverlayPresented\(false\)/.test(hideBody));
+    check("J", "teardownCurrentItem cũng đóng danh sách tập (không sót overlay khi dừng/đổi nguồn/đóng player)",
+          /hideEpisodePicker\(\)/.test(teardownBody));
+    check("J", "pickEpisode vẫn đóng panel TRƯỚC khi báo JS chọn tập",
+          /guard index >= 0[\s\S]*?hideEpisodePicker\(\)[\s\S]*?onSelectEpisode\?\(/.test(body(nativeSrc, "@objc private func pickEpisode", "private func hideEpisodePicker")));
+
+    // --- J5: REGRESSION — luồng TẬP giữ nguyên, chỉ đổi lớp hiển thị ----
+    check("J", "vẫn mở TẬP từ menu long-press (requestEpisodePicker, chỉ phim bộ ≥2 tập)",
+          /func requestEpisodePicker\(\) \{[\s\S]*?guard isPresented, episodeItems\.count >= 2/.test(nativeSrc));
+    check("J", "nút tập vẫn nối đúng action chọn tập cũ (#selector(pickEpisode(_:)))",
+          /addTarget\(self, action: #selector\(pickEpisode\(_:\)\), for: \.touchUpInside\)/.test(showBody));
+    check("J", "updateEpisodes/hideEpisodePickerOverlay (cầu nối JS) giữ nguyên",
+          /func updateEpisodes\(_ items: \[\(id: String, title: String\)\], current: Int, showPicker: Bool\)/.test(nativeSrc)
+          && /func hideEpisodePickerOverlay\(\)/.test(nativeSrc));
+    check("J", "BACK trong player vẫn ưu tiên đóng danh sách tập trước (một lớp)",
+          /if episodePickerView != nil \{[\s\S]*?hideEpisodePicker\(\)/.test(body(nativeSrc, "private func backOneLayerInPlayer()", "func closeByUserGesture()")));
+    check("J", "phụ đề vẫn treo trên contentOverlayView (không bị dời chỗ oan)",
+          /contentOverlayView/.test(body(nativeSrc, "private func installSubtitleOverlay()", "private func startSubtitleSync")));
+    check("J", "mở danh sách tập vẫn TẠM DỪNG video như cũ (player?.pause())",
+          /player\?\.pause\(\)/.test(showBody));
+}
+
 async function main() {
     suiteA();
     suiteB();
@@ -1362,6 +1452,7 @@ async function main() {
     suiteG();
     suiteH();
     suiteI();
+    suiteJ();
     await suiteD();
     console.log("\n=========================================");
     console.log("PASS: " + pass + "   FAIL: " + fail);
