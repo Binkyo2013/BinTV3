@@ -55,6 +55,18 @@ import AVFoundation
 //  - Action MỚI "prepareNext" (helper __bintvPrepareNextNativeEpisode):
 //    JS báo đang nạp tập kế → Swift giữ player mở (backstop 45s).
 //  - JS im lặng → Swift TỰ ĐÓNG player (chống treo phải tắt app).
+//
+// [build 243 — 2026-09-17] MỘT TRÌNH PHÁT DUY NHẤT CHO MODULE PHIM
+// (người dùng chọn trong SETTING → "Trình phát PHIM", lưu UserDefaults):
+//  - Message MỚI `phimBridge` action "needPlayerChoice": web app sắp phát
+//    nhưng CHƯA có trình phát được chọn → KHÔNG nạp player nào (không
+//    <video>, không AVPlayer) → chuyển người dùng sang SETTING.
+//  - User script MỚI `playerChoiceJS` (document-start): bộ nhớ mirror của
+//    lựa chọn đã lưu — `window.__bintvPhimPlayerChoice()` trả
+//    "integrated"/"native"/"" (chưa chọn) cho app.js đọc TRƯỚC khi nạp nguồn.
+//  - `pushPhimPlayerChoice(resume:)`: đẩy lựa chọn sang web app sau mỗi lần
+//    trang nạp xong (`didFinish`) và ngay khi người dùng lưu trong SETTING;
+//    `resume = true` → app.js phát tiếp ĐÚNG phim/tập đang chờ.
 // =====================================================================
 
 final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
@@ -159,6 +171,11 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
                                            injectionTime: .atDocumentStart,
                                            forMainFrameOnly: true))
         content.addUserScript(WKUserScript(source: Self.nativeHandoffJS,
+                                           injectionTime: .atDocumentStart,
+                                           forMainFrameOnly: true))
+        // [build 243] Bộ nhớ "Trình phát PHIM" (SETTING ↔ web app) — phải tồn
+        // tại TRƯỚC app.js vì app.js đọc lựa chọn ngay trước khi nạp nguồn.
+        content.addUserScript(WKUserScript(source: Self.playerChoiceJS,
                                            injectionTime: .atDocumentStart,
                                            forMainFrameOnly: true))
         content.addUserScript(WKUserScript(source: Self.lifecycleBridgeJS,
@@ -329,6 +346,33 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
             self?.webView.evaluateJavaScript(js, completionHandler: nil)
         }
         if Thread.isMainThread { run() } else { DispatchQueue.main.async(execute: run) }
+    }
+
+    // =====================================================================
+    // [build 243 — 2026-09-17] ĐẨY "TRÌNH PHÁT PHIM" (đã lưu) SANG WEB APP
+    //
+    // Web app đọc giá trị này NGAY TRƯỚC KHI nạp nguồn để chỉ khởi tạo đúng
+    // MỘT trình phát. Gọi ở 2 thời điểm:
+    //   (1) `didFinish` — trang (hoặc webview dựng lại) vừa sẵn sàng;
+    //   (2) notification `.binTVPhimPlayerChoiceSaved` — người dùng vừa
+    //       chọn/đổi trong SETTING.
+    // `resume` = true khi Swift còn giữ yêu cầu đang chờ → app.js phát tiếp
+    // ĐÚNG phim/tập người dùng đã chọn trước khi bị chuyển sang SETTING.
+    // =====================================================================
+    private func pushPhimPlayerChoice(resume: Bool) {
+        // `rawValue` của enum cố định ("integrated"/"native") → không có
+        // đường tiêm chuỗi vào JS.
+        let choice = Preferences.shared.phimPlayerChoice?.rawValue ?? ""
+        let js = "try {"
+            + " if (typeof window.__bintvPhimPlayerChoiceSelected === 'function') {"
+            + " window.__bintvPhimPlayerChoiceSelected({ choice: '\(choice)', resume: \(resume) });"
+            + " } else if (typeof window.__bintvSetPhimPlayerChoice === 'function') {"
+            + " window.__bintvSetPhimPlayerChoice('\(choice)');"
+            + " }"
+            + " } catch (e) {}"
+        PhimDebugLog.step("PLAYER-CHOICE", "pushToWebApp", choice.isEmpty ? "unset" : "ok",
+                          "choice=\(choice.isEmpty ? "-" : choice) resume=\(resume)")
+        evaluateJS(js)
     }
 
     /// [build 234] Tua TRÌNH PHÁT TÍCH HỢP tới giây thứ N (gesture kéo ngang ở
@@ -1087,6 +1131,66 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     """
 
     // =====================================================================
+    // [build 243 — 2026-09-17] CẦU NỐI "TRÌNH PHÁT PHIM" (SETTING ↔ web app)
+    //
+    // Người dùng chọn MỘT trong hai trình phát của module PHIM ở
+    // SETTING → "Trình phát PHIM" (lưu UserDefaults — xem Preferences.swift).
+    // Web app đọc giá trị đó TRƯỚC KHI nạp bất kỳ nguồn nào để chỉ khởi tạo
+    // đúng một trình phát (không preload URL vào player không được chọn).
+    //
+    // Script này chỉ là BỘ NHỚ + VẬN CHUYỂN (document-start, tiêm từ Swift
+    // nên chắc chắn tồn tại trước app.js):
+    //   • `__bintvPhimPlayerChoice()` → "integrated" | "native" | "" (chưa chọn);
+    //   • `__bintvSetPhimPlayerChoice(v)` → Swift đẩy giá trị đã lưu (sau khi
+    //     trang nạp xong và mỗi khi người dùng đổi trong SETTING);
+    //   • `__bintvRequestPhimPlayerChoice(title)` → postMessage `phimBridge`
+    //     {action:"needPlayerChoice"} để Swift chuyển người dùng sang SETTING.
+    // Giá trị THẬT nằm ở UserDefaults; biến trong JS chỉ là bản mirror cho
+    // phiên trang hiện tại.
+    // =====================================================================
+
+    private static let playerChoiceJS = """
+    (function () {
+        "use strict";
+        if (window.__binTVPlayerChoiceBridge) { return; }
+        window.__binTVPlayerChoiceBridge = true;
+        // "" = người dùng CHƯA chọn trình phát nào (lần phát phim đầu tiên sẽ
+        // được chuyển sang SETTING để chọn).
+        window.__bintvPhimPlayerChoiceValue = "";
+
+        function normalize(value) {
+            var text = "";
+            try { text = String(value === null || value === undefined ? "" : value); }
+            catch (e) { text = ""; }
+            return (text === "integrated" || text === "native") ? text : "";
+        }
+
+        window.__bintvPhimPlayerChoice = function () {
+            return normalize(window.__bintvPhimPlayerChoiceValue);
+        };
+
+        window.__bintvSetPhimPlayerChoice = function (value) {
+            window.__bintvPhimPlayerChoiceValue = normalize(value);
+            return window.__bintvPhimPlayerChoiceValue;
+        };
+
+        // Chưa có lựa chọn → báo Swift mở SETTING (KHÔNG nạp player nào).
+        window.__bintvRequestPhimPlayerChoice = function (title) {
+            try {
+                var bridge = window.webkit && window.webkit.messageHandlers
+                    && window.webkit.messageHandlers.phimBridge;
+                if (!bridge) { return false; }
+                bridge.postMessage({
+                    action: "needPlayerChoice",
+                    title: String(title || "")
+                });
+                return true;
+            } catch (e) { return false; }
+        };
+    })();
+    """
+
+    // =====================================================================
     // Host lifecycle bridge (document-start)
     //
     // The web app was originally written for a standalone TV shell.  Its
@@ -1470,6 +1574,21 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
             let on = (body["enabled"] as? Bool) ?? false
             PhimDebugLog.step("BRIDGE", "setPlayerLandscape", "ok", on ? "on=1 (buộc landscape)" : "on=0 (giữ landscape)")
             setPlayerLandscape(on)
+        case "needPlayerChoice":
+            // =================================================================
+            // [build 243 — 2026-09-17] Web app PHIM chuẩn bị phát nhưng CHƯA
+            // có trình phát nào được chọn → KHÔNG nạp player nào ở cả hai
+            // phía; chuyển người dùng sang SETTING (mục "Trình phát PHIM").
+            // Chọn xong, `PhimPlayerChoiceCenter` báo lại → push giá trị sang
+            // web app (resume = true) → phát tiếp đúng phim/tập vừa chọn.
+            // =================================================================
+            let title = (body["title"] as? String) ?? ""
+            PhimDebugLog.step("BRIDGE", "needPlayerChoice", "recv",
+                              "chưa có trình phát được lưu → mở SETTING; title=\(title.isEmpty ? "-" : title)")
+            let request: () -> Void = {
+                PhimPlayerChoiceCenter.shared.requestSelection(title: title)
+            }
+            if Thread.isMainThread { request() } else { DispatchQueue.main.async(execute: request) }
         case "exit":
             // PHIM trong BinTV là TAB — không đóng cả app (khác Android
             // standalone). Người dùng chuyển tab bình thường.
@@ -1599,6 +1718,17 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
             queue: .main
         ) { [weak self] notification in
             self?.scenePhaseDidChange(notification)
+        })
+        // [build 243] Người dùng vừa LƯU "Trình phát PHIM" trong SETTING →
+        // đẩy giá trị sang web app (kèm cờ resume để phát tiếp phim/tập đang
+        // chờ). Observer được gỡ trong `deinit` cùng các observer lifecycle.
+        lifecycleObservers.append(center.addObserver(
+            forName: .binTVPhimPlayerChoiceSaved,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let resume = (notification.userInfo?["resume"] as? Bool) ?? false
+            self?.pushPhimPlayerChoice(resume: resume)
         })
     }
 
@@ -2240,6 +2370,9 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         PhimDebugLog.step("NAVIGATION", "didFinish", "ok",
                           PhimDebugLog.sanitizeURL(webView.url?.absoluteString ?? ""))
         injectStatusBarInset()
+        // [build 243] Trang sẵn sàng → đẩy trình phát ĐÃ LƯU sang web app
+        // (không hỏi lại nếu người dùng đã chọn ở lần chạy trước).
+        pushPhimPlayerChoice(resume: false)
         guard awaitingStateRestoreAfterLoad else { return }
         let epoch = lifecycleEpoch
         restorePageStateWhenReady(rebuilt: true, epoch: epoch, attempt: 0)

@@ -307,28 +307,42 @@
     // phải trả lời NGAY, không thể chờ evaluateJavaScript.
     var movieIosUiStateLastSignature = "";
     // =================================================================
-    // [build 234 — 2026-09-15] CHÍNH SÁCH ƯU TIÊN TRÌNH PHÁT (THAY ĐỔI)
+    // [build 243 — 2026-09-17] CHÍNH SÁCH TRÌNH PHÁT: NGƯỜI DÙNG CHỌN MỘT
     //
-    //   Ưu tiên 1 (LUÔN thử trước): TRÌNH PHÁT TÍCH HỢP của BinTV/PHIM —
-    //     thẻ <video> bên trong module PHIM (HUD, phụ đề, chọn tập của app).
-    //   Fallback: TRÌNH PHÁT iOS (AVPlayerViewController của
-    //     PhimNativePlayerController) — CHỈ được mở khi trình phát tích hợp
-    //     KHÔNG THỂ phát: không nguồn tương thích / không mở được video /
-    //     lỗi không thể tiếp tục.
+    // Module PHIM có HAI trình phát:
+    //   • TRÌNH PHÁT TÍCH HỢP — thẻ <video> trong web app này (app.js/hls.js);
+    //   • TRÌNH PHÁT iOS — AVPlayerViewController (PhimNativePlayerController).
     //
-    // Bản 231–233 handoff TRƯỚC khi thử (heuristic container/codec
-    // `iosNeedsNativePlayerFor` + cờ `moviePreferNativePlayer` latching) →
-    // trình phát iOS mở NGAY TỪ ĐẦU với phần lớn nguồn Stremio. Yêu cầu mới
-    // cấm điều đó ⇒ đã BỎ pre-flight handoff. Các nhánh fallback sang trình
-    // phát iOS vẫn còn nguyên và đầy đủ, tất cả đều nằm SAU khi trình phát
-    // tích hợp đã lỗi:
-    //   • handleMoviePlaybackError() → hết nguồn web → requestNativeMoviePlayback
-    //   • phim_ios_fallback.js: proxy fail → direct fail → native handoff
-    //   • __bintvNativePlaybackFailed → quay lại nguồn web kế tiếp.
-    // `iosNeedsNativePlayerFor` giữ lại làm CHẨN ĐOÁN (log) — không còn
-    // quyền quyết định mở trình phát iOS trước.
+    // Bản 234–242: MỌI lần phát đều bắt đầu bằng trình phát tích hợp rồi
+    // "leo thang" sang trình phát iOS khi nguồn lỗi — và khi leo thang thẻ
+    // <video> VẪN GIỮ `src`, nên HAI player cùng tải MỘT URL (tốn băng
+    // thông, load lâu, tốn CPU/RAM, dễ xung đột).
+    //
+    // Bản 243: người dùng CHỌN MỘT trình phát trong SETTING → "Trình phát
+    // PHIM" (lưu ở UserDefaults của app, giữ qua các lần đóng/mở app).
+    //   • ĐÃ chọn "integrated" → chỉ thẻ <video> được nạp nguồn; KHÔNG mở
+    //     trình phát iOS kể cả khi nguồn lỗi (báo lỗi THẬT + gợi ý đổi trong
+    //     SETTING).
+    //   • ĐÃ chọn "native"     → chỉ trình phát iOS được nạp nguồn; thẻ
+    //     <video> KHÔNG BAO GIỜ nhận `src`.
+    //   • CHƯA chọn            → KHÔNG nạp player nào, chuyển sang SETTING
+    //     để chọn; chọn xong tự quay lại PHIM và phát tiếp ĐÚNG phim/tập
+    //     vừa chọn (`moviePendingPlayerChoicePlayback`).
+    // Giá trị lựa chọn do Swift tiêm (script `playerChoiceJS` của
+    // PhimWebView.swift) — đọc bằng `movieChosenPlayer()`.
+    // Ngoài WKWebView iOS (Android/Tizen/Windows): không có cầu nối → mọi
+    // nhánh dưới đây KHÔNG đổi hành vi cũ (vẫn phát bằng thẻ <video>).
+    //
+    // `MOVIE_INTEGRATED_PLAYER_FIRST` chỉ còn là MẶC ĐỊNH AN TOÀN cho
+    // trường hợp không đọc được lựa chọn (vd cầu nối lỗi) — KHÔNG còn là
+    // chính sách "thử tích hợp rồi fallback sang iOS".
+    // `iosNeedsNativePlayerFor` giữ lại làm CHẨN ĐOÁN (log) — không quyết
+    // định đường phát.
     // =================================================================
     var MOVIE_INTEGRATED_PLAYER_FIRST = true;
+    // [build 243] Phim/tập đang CHỜ người dùng chọn trình phát trong SETTING
+    // ({url, title, subtitleContext}) — phát tiếp ngay khi lựa chọn được lưu.
+    var moviePendingPlayerChoicePlayback = null;
     var movieBootstrapRequestInFlight = null;
     var movieBootstrapCache = null;
     var moviePrefetchTimer = null;
@@ -4950,6 +4964,157 @@
         }
     }
 
+    // =================================================================
+    // [build 243 — 2026-09-17] CHỌN TRÌNH PHÁT CHO MODULE PHIM
+    //
+    // Người dùng chọn MỘT trong hai trình phát ở SETTING → "Trình phát PHIM";
+    // Swift lưu vào UserDefaults và TIÊM giá trị sang web app (script
+    // `playerChoiceJS` của PhimWebView.swift → `window.__bintvPhimPlayerChoice`).
+    // Ở đây chỉ ĐỌC giá trị đó và áp dụng: KHÔNG BAO GIỜ nạp cả hai player.
+    // =================================================================
+
+    /// Trình phát người dùng đã chọn: "integrated" | "native" | "" (chưa chọn).
+    function movieChosenPlayer() {
+        try {
+            if (typeof window.__bintvPhimPlayerChoice === "function") {
+                var value = String(window.__bintvPhimPlayerChoice() || "");
+                if (value === "integrated" || value === "native") return value;
+            }
+        } catch (e) {}
+        return "";
+    }
+
+    /// Người dùng ĐÃ chủ động chọn trình phát tích hợp? (chặn mọi đường mở
+    /// trình phát iOS — kể cả fallback khi nguồn lỗi).
+    function movieUserChoseIntegratedPlayer() {
+        return movieChosenPlayer() === "integrated";
+    }
+
+    /// Người dùng ĐÃ chủ động chọn trình phát iOS?
+    function movieUserChoseNativePlayer() {
+        return movieChosenPlayer() === "native";
+    }
+
+    /// Báo Swift "chưa có trình phát được chọn" → Swift chuyển người dùng
+    /// sang module SETTING (mục "Trình phát PHIM"). KHÔNG nạp player nào.
+    /// Trả false khi không có cầu nối (Android/Tizen/Windows) → giữ hành vi cũ.
+    function requestMoviePlayerChoiceFromUser(title) {
+        try {
+            var handler = window.webkit && window.webkit.messageHandlers
+                && window.webkit.messageHandlers.phimBridge;
+            if (!handler) return false;
+            handler.postMessage({
+                action: "needPlayerChoice",
+                title: String(title || currentMoviePlaybackTitle() || "Phim")
+            });
+            return true;
+        } catch (e) { return false; }
+    }
+
+    /// Swift gọi SAU KHI người dùng chọn trình phát trong SETTING.
+    /// `info` = { choice: "integrated"|"native", resume: bool } (hoặc chuỗi).
+    /// Có phim/tập đang chờ (`moviePendingPlayerChoicePlayback`) → phát tiếp
+    /// ĐÚNG phim/tập đó bằng trình phát vừa chọn — không bắt người dùng tìm
+    /// lại phim từ đầu.
+    window.__bintvPhimPlayerChoiceSelected = function (info) {
+        var choice = "";
+        if (typeof info === "string") choice = info;
+        else if (info && info.choice) choice = String(info.choice);
+        if (choice !== "integrated" && choice !== "native") choice = "";
+        // `resume` = true CHỈ khi Swift còn giữ yêu cầu đang chờ (người dùng
+        // được PHIM chuyển sang SETTING và chưa rời đi). Mọi lần đẩy giá trị
+        // khác (trang nạp xong / đổi trình phát lúc đang duyệt SETTINGS) chỉ
+        // cập nhật lựa chọn, KHÔNG tự phát lại phim cũ.
+        var shouldResume = !!(info && info.resume === true);
+        try {
+            if (typeof window.__bintvSetPhimPlayerChoice === "function") {
+                window.__bintvSetPhimPlayerChoice(choice);
+            }
+        } catch (e) {}
+        var pending = moviePendingPlayerChoicePlayback;
+        moviePendingPlayerChoicePlayback = null;
+        try {
+            window.__phimDebug && window.__phimDebug.log("[PLAYER] trình phát đã chọn:",
+                choice || "(chưa rõ)", "| resume:", shouldResume,
+                "| phim chờ:", pending ? pending.title : "(không)");
+        } catch (e2) {}
+        if (!choice || !pending || !shouldResume) return false;
+        // Đúng phim/tập người dùng đã chọn trước khi bị chuyển sang SETTING.
+        startMoviePlayback(pending.url, pending.title, pending.subtitleContext);
+        return true;
+    };
+
+    /// TRẢ LẠI TÀI NGUYÊN của TRÌNH PHÁT TÍCH HỢP: gỡ `src` + `load()` để
+    /// WebKit DỪNG hẳn việc tải nguồn. Trước build 243, sau khi handoff sang
+    /// trình phát iOS thẻ <video> VẪN GIỮ src → HAI player cùng tải MỘT URL.
+    function releaseMovieIntegratedPlayerSource() {
+        try {
+            var htmlVideo = document.getElementById("bintv-movie-html5-player");
+            if (!htmlVideo) return;
+            try { detachJvhdHls(); } catch (e0) {}
+            try { htmlVideo.pause(); } catch (e1) {}
+            var hadSource = !!(htmlVideo.getAttribute("src") || htmlVideo.src);
+            if (hadSource) {
+                try { htmlVideo.removeAttribute("src"); htmlVideo.load(); } catch (e2) {}
+            }
+        } catch (e3) {}
+    }
+
+    /// Phát bằng TRÌNH PHÁT iOS khi người dùng đã chọn nó: dựng đúng trạng
+    /// thái phiên/UI như nhánh handoff cũ nhưng TUYỆT ĐỐI KHÔNG gán `src`
+    /// cho thẻ <video> → trình phát tích hợp không được khởi tạo/nạp nguồn.
+    /// Trả false nếu cầu nối native không nhận (không có url / hết trần
+    /// handoff) — người gọi báo lỗi THẬT, KHÔNG mở player còn lại.
+    function startMoviePlaybackOnChosenNativePlayer(url, title, subtitleContext) {
+        if (!isIosNativePlaybackBridge()) return false;
+        movieNativePlaybackSession += 1;
+        movieNativeHandoffActive = false;
+        ensureMovieExperienceUI();
+        moviePlayerOpen = true;
+        pushMovieIosUiState(true);
+        moviePlayerPaused = false;
+        moviePlayerUsingAVPlay = false;
+        cancelMovieScrubInteraction(true);
+        resetMovieSeekOperationState();
+        moviePlaybackReportedTimeScale = 0;
+        moviePlaybackLastRawTime = -1;
+        moviePlaybackLastRawAt = 0;
+        syncMoviePlaybackClock(0, false);
+        hideMovieSeekTimelineImmediately();
+        moviePlayerEpisodeSwitchInProgress = false;
+        syncNativeEpisodeList(false);
+        var browser = document.getElementById("bintv-movie-browser");
+        var player = document.getElementById("bintv-movie-player");
+        if (browser) browser.classList.add("player-active");
+        if (player) {
+            player.classList.add("show");
+            player.setAttribute("tabindex", "-1");
+            try { player.focus(); } catch (focusError) {}
+        }
+        // Phụ đề: phiên mới (giống hệt nhánh phát bằng thẻ <video>).
+        movieSubtitleRequestToken++;
+        movieCurrentSubtitleContext = subtitleContext || { name: title || "Phim", type: "movie" };
+        movieSubtitleUserDisabled = true;
+        movieSubtitleEnableRequested = false;
+        movieSubtitleLoadState = "idle";
+        movieSubtitleOptions = [];
+        movieSubtitleActiveIndex = -1;
+        movieSubtitleActiveSource = "";
+        clearMovieSubtitleRendering();
+        updateMovieSubtitleButton("CC Vietsub: Tắt", false);
+        updateMoviePlayerStatus("Đang mở trình phát iOS…");
+        // Trình phát tích hợp KHÔNG được giữ nguồn nào (chống 2 player cùng load).
+        releaseMovieIntegratedPlayerSource();
+        rememberMovieStreamSource(url, title, subtitleContext && subtitleContext.stream);
+        movieAutoAdvanceActive = false;
+        try {
+            window.__phimDebug && window.__phimDebug.log(
+                "[PLAYER] người dùng đã chọn TRÌNH PHÁT iOS → chỉ nạp AVPlayer:",
+                String(url).substring(0, 140));
+        } catch (logError) {}
+        return requestNativeMoviePlayback("user-chosen-native-player", url) === true;
+    }
+
     // Tiêu đề phim: ưu tiên tiêu đề app.js đang giữ, kế đến là "ý định phát"
     // do cầu nối iOS ghi lại khi người dùng CLICK thẻ phim.
     function currentMoviePlaybackTitle(fallbackTitle) {
@@ -4969,6 +5134,19 @@
     // Trả về true khi đã gửi thành công (app.js KHÔNG hiện lỗi "trên TV" nữa).
     function requestNativeMoviePlayback(reason, explicitUrl) {
         if (!isIosNativePlaybackBridge()) return false;
+        // =================================================================
+        // [build 243] NGƯỜI DÙNG ĐÃ CHỌN TRÌNH PHÁT TÍCH HỢP → KHÔNG được mở
+        // trình phát còn lại (trình phát iOS), kể cả khi nguồn web lỗi. Trả
+        // false để nhánh lỗi hiện thông báo THẬT + gợi ý đổi trình phát trong
+        // SETTING (xem describeMoviePlaybackUnavailable).
+        // =================================================================
+        if (movieUserChoseIntegratedPlayer()) {
+            try {
+                window.__phimDebug && window.__phimDebug.log(
+                    "[PLAYER] bỏ qua mở trình phát iOS: người dùng đã chọn trình phát tích hợp");
+            } catch (e) {}
+            return false;
+        }
         var url = String(explicitUrl || movieCurrentStreamUrl || "");
         // Referer đọc được từ chính URL đang gán cho <video> (tham số __ref
         // của route /proxy) — dùng khi app.js chưa kịp ghi movieCurrentStreamReferer.
@@ -5040,6 +5218,13 @@
         movieNativeHandoffUrls[url] = true;
         movieNativeHandoffCount += 1;
         movieNativeHandoffActive = true;
+        // =================================================================
+        // [build 243] TRÌNH PHÁT iOS SẮP TẢI NGUỒN NÀY → gỡ src của thẻ
+        // <video> NGAY để WebKit dừng tải. Trước đây thẻ <video> vẫn giữ src
+        // trong lúc AVPlayerViewController tải CÙNG MỘT URL → hai player, hai
+        // luồng mạng, một nội dung (chậm + tốn băng thông + dễ xung đột).
+        // =================================================================
+        releaseMovieIntegratedPlayerSource();
         // [build 233] Native giờ là player ĐANG HIỂN THỊ → các lần phát kế
         // tiếp của cùng phim (tự chuyển tập / đổi tập / nguồn dự phòng) phải
         // tiếp tục đi qua native (đóng hẳn player mới hạ cờ này).
@@ -5202,8 +5387,14 @@
     // fallback TV nên hiện câu đó — chính là lỗi người dùng báo cáo).
     function describeMoviePlaybackUnavailable(detail) {
         if (isIosNativePlaybackBridge()) {
-            var base = "Không phát được nguồn phim này trên iPhone (đã thử trình phát gốc iOS và các nguồn dự phòng)";
-            return detail ? base + " — " + detail : base;
+            // [build 243] Chỉ MỘT trình phát được dùng (theo lựa chọn của
+            // người dùng) → nói rõ trình phát nào đã thử và CHỈ RÕ nơi đổi
+            // trình phát, thay vì âm thầm mở player còn lại.
+            var base = movieUserChoseNativePlayer()
+                ? "Không phát được nguồn phim này trên iPhone bằng trình phát iOS (đã thử các nguồn dự phòng)"
+                : "Không phát được nguồn phim này trên iPhone bằng trình phát tích hợp (đã thử các nguồn dự phòng)";
+            var hint = "Có thể đổi trình phát trong SETTING → Trình phát PHIM.";
+            return (detail ? base + " — " + detail : base) + " " + hint;
         }
         return "Không thể phát nguồn phim này trên TV";
     }
@@ -6412,7 +6603,19 @@
         autoAdvance: startMovieAutoAdvance,
         openPlayerEpisodes: openMoviePlayerEpisodeMenu,
         hasEpisodeList: hasInPlayerEpisodeList,
-        pushUiState: function () { pushMovieIosUiState(true); }
+        pushUiState: function () { pushMovieIosUiState(true); },
+        // [build 243] Seam cho test kiểm tra CHÍNH SÁCH MỘT TRÌNH PHÁT
+        // (SUITE I của tests/ios-native-handoff): đọc trình phát đã chọn,
+        // phim/tập đang chờ chọn, và tự gỡ nguồn của trình phát tích hợp.
+        chosenPlayer: movieChosenPlayer,
+        pendingPlayerChoice: function () {
+            if (!moviePendingPlayerChoicePlayback) return null;
+            return {
+                url: moviePendingPlayerChoicePlayback.url,
+                title: moviePendingPlayerChoicePlayback.title
+            };
+        },
+        releaseIntegratedSource: releaseMovieIntegratedPlayerSource
     };
 
     window.__bintvNativeSelectEpisode = function (info) {
@@ -6610,6 +6813,54 @@
 
     function startMoviePlayback(url, title, subtitleContext) {
         if (window.__phimDebug) window.__phimDebug.log("startMoviePlayback", { url: url, title: title, hasWebapis: !!(window.webapis && webapis.avplay) });
+        // =================================================================
+        // [build 243 — 2026-09-17] MỘT TRÌNH PHÁT DUY NHẤT (THEO LỰA CHỌN)
+        //
+        // Kiểm tra NGAY TRƯỚC KHI nạp bất kỳ nguồn nào:
+        //   • CHƯA chọn trình phát  → KHÔNG nạp player nào (không <video>,
+        //     không AVPlayer) → báo Swift chuyển sang SETTING; nhớ đúng
+        //     phim/tập để phát tiếp khi người dùng chọn xong.
+        //   • chọn "native"         → chỉ trình phát iOS nạp URL; thẻ <video>
+        //     không nhận src (không preload, không tạo instance chờ sẵn).
+        //   • chọn "integrated"     → đi tiếp nhánh <video> bên dưới (như cũ).
+        // Phiên JVHD (live) có luồng + HUD chất lượng riêng của web app nên
+        // giữ nguyên đường phát cũ. Ngoài WKWebView iOS: không có cầu nối →
+        // bỏ qua toàn bộ khối này (hành vi Android/Tizen/Windows không đổi).
+        // =================================================================
+        if (isIosNativePlaybackBridge() && !jvhdPlayerSession) {
+            var chosenPlayer = movieChosenPlayer();
+            if (!chosenPlayer) {
+                moviePendingPlayerChoicePlayback = {
+                    url: String(url || ""),
+                    title: String(title || "Phim"),
+                    subtitleContext: subtitleContext || null
+                };
+                moviePlayerEpisodeSwitchInProgress = false;
+                if (requestMoviePlayerChoiceFromUser(title)) {
+                    try {
+                        window.__phimDebug && window.__phimDebug.log(
+                            "[PLAYER] chưa chọn trình phát → KHÔNG nạp player nào, chuyển sang SETTING:",
+                            String(title || ""));
+                    } catch (logError) {}
+                    showMovieStatus("Chưa chọn trình phát PHIM — mở SETTING để chọn…", false);
+                    return;
+                }
+                // Không gửi được (không có handler phimBridge) → phát như cũ.
+                moviePendingPlayerChoicePlayback = null;
+            } else if (chosenPlayer === "native") {
+                if (startMoviePlaybackOnChosenNativePlayer(url, title, subtitleContext)) return;
+                // Trình phát iOS không nhận nguồn (URL đã thử / hết trần
+                // handoff) → KHÔNG mở trình phát còn lại, báo lỗi THẬT.
+                if (moviePlayerOpen) {
+                    updateMoviePlayerStatus(describeMoviePlaybackUnavailable(
+                        "trình phát iOS không nhận nguồn này"));
+                } else {
+                    showMovieStatus(describeMoviePlaybackUnavailable(
+                        "trình phát iOS không nhận nguồn này"), true);
+                }
+                return;
+            }
+        }
         // [BinTV iOS build 231] MỖI lần phát = MỘT phiên mới: tăng session id
         // để mọi callback từ trình phát native của LẦN PHÁT TRƯỚC (nếu còn
         // bay về muộn) bị isStaleNativeCallback() loại bỏ — không bao giờ
