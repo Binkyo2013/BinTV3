@@ -137,6 +137,13 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
+      - name: PHIM lifecycle regression tests
+        shell: bash
+        run: |
+          npm install --prefix tests/ios-native-handoff --no-audit --no-fund
+          npm test --prefix tests/ios-native-handoff
+          python3 tests/ios-native-handoff/lifecycle_native.py
+
       # ------------------------------------------------------------------------
       # (0) INIT xbuild.log — tao file log NGAY sau checkout de moi buoc sau
       #     deu co cho append. Dam bao artifact 'xbuild-log' LUON ton tai,
