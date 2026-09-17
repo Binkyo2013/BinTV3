@@ -104,6 +104,9 @@ on:
   # (step "Attach IPA to GitHub Release" duoc kich hoat khi
   #  startsWith(github.ref, 'refs/tags/v')).
   push:
+    # Validate this fix without a release tag or writing to main.
+    branches:
+      - "arena/01a0b19f-bintv3"
     tags:
       - "v*"
 
