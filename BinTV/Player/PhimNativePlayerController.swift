@@ -930,6 +930,10 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
         endedGraceWork = nil
         waitingForNextInstruction = false
         removeSubtitleOverlay()     // [build 232] dọn phụ đề khi đổi/đóng nguồn
+        // [build 245] KHÔNG BAO GIỜ để panel danh sách tập sót lại khi dừng /
+        // đổi nguồn / đóng player (panel giờ treo trên view gốc của trình phát
+        // nên phải gỡ chủ động — kèm hạ cờ ưu tiên gesture).
+        hideEpisodePicker()
         if let player = player {
             player.pause()
             player.replaceCurrentItem(with: nil)
@@ -1041,66 +1045,112 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
     //     khi người dùng chủ động mở từ menu, không phải nút luôn hiển thị.
     // =================================================================
 
+    // =================================================================
+    // [build 245 — 2026-09-17] DANH SÁCH TẬP = LỚP TRÊN CÙNG CỦA TRÌNH PHÁT
+    //
+    // VẤN ĐỀ (đúng triệu chứng trên máy thật): panel danh sách tập treo vào
+    // `contentOverlayView` — lớp mà AVPlayerViewController đặt NẰM DƯỚI thanh
+    // điều khiển tích hợp (transport bar chứa progress/seek bar). Panel neo
+    // ở đáy màn hình → nằm ĐÚNG vùng của thanh trượt tua:
+    //   • về HIỂN THỊ: seek bar vẽ đè lên danh sách tập;
+    //   • về HIT-TESTING: chạm/vuốt trong vùng chồng được giao cho scrubber
+    //     TRƯỚC → vuốt cuộn danh sách bị hiểu nhầm thành tua video.
+    // CÁCH SỬA (tối thiểu, đúng nguyên nhân): treo panel vào VIEW GỐC của
+    // AVPlayerViewController (`playerController.view`) + bringSubviewToFront
+    // → panel nằm TRÊN MỌI thành phần của trình phát (video + controls) về
+    // cả hiển thị, z-order lẫn hit-testing; UIScrollView trong panel bắt toàn
+    // bộ vuốt dọc trong vùng của nó — progress bar KHÔNG còn nhận được touch.
+    // Danh sách chuyển sang dạng DỌC (Tập 1…Tập N xếp chồng, vuốt LÊN/XUỐNG
+    // để cuộn) đúng giao diện yêu cầu; LOGIC CHỌN TẬP giữ nguyên 100%
+    // (chạm nút → pickEpisode → onSelectEpisode về JS).
+    // ĐÓNG: hideEpisodePicker() gỡ panel KHỎI hierarchy hoàn toàn (không để
+    // overlay vô hình chặn touch) + hạ cờ ưu tiên gesture — seek bar nhận lại
+    // thao tác tua như cũ. teardownCurrentItem() cũng gọi hide để không bao
+    // giờ sót panel khi dừng/đổi nguồn/đóng player.
+    // =================================================================
     private func showEpisodePicker() {
-        guard let overlay = playerController?.contentOverlayView else { return }
+        // VIEW GỐC của trình phát — KHÔNG dùng contentOverlayView (lớp đó nằm
+        // DƯỚI thanh progress/seek bar của AVKit, xem khối chú thích build 245).
+        guard let hostView = playerController?.view else { return }
         hideEpisodePicker()
         let panel = UIView()
         panel.translatesAutoresizingMaskIntoConstraints = false
         panel.backgroundColor = UIColor(white: 0.08, alpha: 0.94)
         panel.layer.cornerRadius = 14
-        overlay.addSubview(panel)
+        // LỚP TRÊN CÙNG: subview thêm SAU CÙNG của view gốc + đưa lên đỉnh +
+        // zPosition cao → panel đè mọi control của AVKit về hiển thị và là view
+        // ĐẦU TIÊN được hit-test trong vùng của nó (touch không lọt xuống
+        // scrubber/progress bar bên dưới).
+        hostView.addSubview(panel)
+        hostView.bringSubviewToFront(panel)
+        panel.layer.zPosition = 999
         NSLayoutConstraint.activate([
-            panel.leadingAnchor.constraint(equalTo: overlay.leadingAnchor, constant: 16),
-            panel.trailingAnchor.constraint(equalTo: overlay.trailingAnchor, constant: -16),
-            panel.bottomAnchor.constraint(equalTo: overlay.safeAreaLayoutGuide.bottomAnchor, constant: -16),
-            panel.heightAnchor.constraint(lessThanOrEqualTo: overlay.heightAnchor, multiplier: 0.42)
-        ])
-        let stack = UIStackView()
-        stack.axis = .vertical
-        stack.spacing = 8
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        panel.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: panel.topAnchor, constant: 12),
-            stack.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 12),
-            stack.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -12),
-            stack.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -12)
+            panel.leadingAnchor.constraint(equalTo: hostView.safeAreaLayoutGuide.leadingAnchor, constant: 16),
+            panel.trailingAnchor.constraint(equalTo: hostView.safeAreaLayoutGuide.trailingAnchor, constant: -16),
+            panel.bottomAnchor.constraint(equalTo: hostView.safeAreaLayoutGuide.bottomAnchor, constant: -16),
+            panel.topAnchor.constraint(greaterThanOrEqualTo: hostView.safeAreaLayoutGuide.topAnchor, constant: 16),
+            panel.heightAnchor.constraint(lessThanOrEqualTo: hostView.heightAnchor, multiplier: 0.5)
         ])
         let title = UILabel()
         title.text = "Danh sách tập"
         title.textColor = .white
         title.font = UIFont.systemFont(ofSize: 18, weight: .bold)
-        stack.addArrangedSubview(title)
+        title.translatesAutoresizingMaskIntoConstraints = false
+        panel.addSubview(title)
+        // SCROLL DỌC: vuốt LÊN/XUỐNG = cuộn danh sách tập. Panel đang ở lớp
+        // trên cùng nên pan-gesture của scroll view luôn nhận touch TRƯỚC
+        // thanh progress — không còn cảnh vuốt danh sách bị biến thành tua.
         let scroll = UIScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.alwaysBounceVertical = true
+        panel.addSubview(scroll)
         let rowStack = UIStackView()
-        rowStack.axis = .horizontal
+        rowStack.axis = .vertical           // danh sách DỌC: Tập 1, Tập 2, …
         rowStack.spacing = 8
         rowStack.translatesAutoresizingMaskIntoConstraints = false
         scroll.addSubview(rowStack)
         NSLayoutConstraint.activate([
-            rowStack.topAnchor.constraint(equalTo: scroll.topAnchor),
-            rowStack.bottomAnchor.constraint(equalTo: scroll.bottomAnchor),
-            rowStack.leadingAnchor.constraint(equalTo: scroll.leadingAnchor),
-            rowStack.trailingAnchor.constraint(equalTo: scroll.trailingAnchor),
-            rowStack.heightAnchor.constraint(equalTo: scroll.heightAnchor)
+            title.topAnchor.constraint(equalTo: panel.topAnchor, constant: 12),
+            title.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 12),
+            title.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -12),
+            scroll.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 10),
+            scroll.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 12),
+            scroll.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -12),
+            scroll.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -12),
+            rowStack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor),
+            rowStack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor),
+            rowStack.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor),
+            rowStack.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor),
+            rowStack.widthAnchor.constraint(equalTo: scroll.frameLayoutGuide.widthAnchor)
         ])
         for (index, item) in episodeItems.enumerated() {
             let button = UIButton(type: .system)
             button.tag = index
             button.setTitle(item.title, for: .normal)
+            button.contentHorizontalAlignment = .left
+            button.titleLabel?.lineBreakMode = .byTruncatingTail
             button.setTitleColor(index == currentEpisodeIndex ? .black : .white, for: .normal)
             button.backgroundColor = index == currentEpisodeIndex
                 ? UIColor.white
                 : UIColor.white.withAlphaComponent(0.14)
             button.layer.cornerRadius = 8
             button.contentEdgeInsets = UIEdgeInsets(top: 10, left: 12, bottom: 10, right: 12)
+            button.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
             button.addTarget(self, action: #selector(pickEpisode(_:)), for: .touchUpInside)
             rowStack.addArrangedSubview(button)
         }
-        scroll.heightAnchor.constraint(equalToConstant: 56).isActive = true
-        stack.addArrangedSubview(scroll)
+        // Viewport cao ĐÚNG bằng nội dung khi danh sách ngắn; danh sách dài
+        // vượt trần 50% màn hình → ràng buộc trần thắng, scroll view thu nhỏ
+        // lại và cuộn (độ cao ước lượng từ số tập, mỗi dòng ≥44pt + spacing 8).
+        let estimatedContent = CGFloat(episodeItems.count) * 44
+            + CGFloat(max(0, episodeItems.count - 1)) * 8
+        let fitContent = scroll.heightAnchor.constraint(equalToConstant: estimatedContent)
+        fitContent.priority = UILayoutPriority(999)
+        fitContent.isActive = true
         episodePickerView = panel
+        // [build 245] Cờ ưu tiên gesture: vuốt cạnh (tua/Return/menu) tạm nhường
+        // panel cho tới khi hideEpisodePicker() hạ cờ.
+        BinTVPlayerGestureHub.shared.setPlayerOverlayPresented(true)
         player?.pause()
     }
 
@@ -1112,9 +1162,14 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
         onSelectEpisode?(index, episodeItems[index].id)
     }
 
+    /// [build 245] ĐÓNG danh sách tập: gỡ panel KHỎI view hierarchy HOÀN TOÀN
+    /// (không để overlay vô hình tiếp tục chặn touch của trình phát — thanh
+    /// progress/seek bar nhận lại thao tác tua như cũ) + hạ cờ ưu tiên gesture
+    /// để vuốt cạnh (tua/Return/menu) hoạt động lại bình thường.
     private func hideEpisodePicker() {
         episodePickerView?.removeFromSuperview()
         episodePickerView = nil
+        BinTVPlayerGestureHub.shared.setPlayerOverlayPresented(false)
     }
 
     /// Gỡ label + observer (tắt phụ đề / đổi nguồn / đóng player).
@@ -1132,6 +1187,9 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
         timeoutWork?.cancel()
         endedGraceWork?.cancel()
         statusObservation = nil
+        // [build 245] chống kẹt cờ ưu tiên gesture nếu controller bị huỷ khi
+        // panel danh sách tập còn đang mở.
+        BinTVPlayerGestureHub.shared.setPlayerOverlayPresented(false)
         if let observer = subtitleTimeObserver {
             player?.removeTimeObserver(observer)
         }
