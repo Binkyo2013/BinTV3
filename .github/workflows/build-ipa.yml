@@ -930,12 +930,14 @@ jobs:
           echo "======== [STEP] Verify .ipa ========"
           set -euo pipefail
           python3 - "$IPA_PATH" <<'PY'
-          import os, plistlib, struct, sys, zipfile
+          import hashlib, os, pathlib, plistlib, struct, sys, zipfile
 
           ipa = sys.argv[1]
           errs = []
           z = zipfile.ZipFile(ipa)
           names = z.namelist()
+          if z.testzip() is not None:
+              errs.append("IPA ZIP CRC verification failed")
 
           # 1) goc zip chi duoc chua Payload/
           tops = sorted({n.split("/", 1)[0] for n in names})
@@ -1064,12 +1066,35 @@ jobs:
           if doubled:
               errs.append("Co duong dan thuan (Payload bi lap) trong IPA: %s" % doubled[:5])
 
+          # Verify the actual packaged version, orientation and PHIM resources,
+          # not just the archive task's exit code. Publish a durable annotation
+          # so the IPA hash is accessible even when artifact downloads are blocked.
+          if len(apps) == 1 and "%s/Info.plist" % apps[0] in names:
+              packaged = plistlib.loads(z.read("%s/Info.plist" % apps[0]))
+              with open("BinTV/Info.plist", "rb") as source_plist:
+                  expected = plistlib.load(source_plist)
+              for key in ("CFBundleShortVersionString", "CFBundleVersion",
+                          "UISupportedInterfaceOrientations", "UISupportedInterfaceOrientations~ipad"):
+                  if packaged.get(key) != expected.get(key):
+                      errs.append("Packaged %s differs from source Info.plist" % key)
+              web_root = pathlib.Path("BinTV/Phim/Web")
+              for resource in web_root.rglob("*"):
+                  if not resource.is_file():
+                      continue
+                  member = "%s/Web/%s" % (apps[0], resource.relative_to(web_root).as_posix())
+                  if member not in names or z.read(member) != resource.read_bytes():
+                      errs.append("Missing/modified PHIM resource: %s" % member)
+
           print("entries        = %d" % len(names))
           print("IPA size       = %d bytes" % os.path.getsize(ipa))
           for e in errs:
               print("::error::" + e)
           if errs:
               sys.exit(1)
+          digest = hashlib.sha256(pathlib.Path(ipa).read_bytes()).hexdigest()
+          print("::notice title=Verified IPA::BinTV %s (%s); bytes=%s; SHA256=%s; slices=%s; platforms=%s; PHIM resources and landscape masks match source"
+                % (packaged.get("CFBundleShortVersionString"), packaged.get("CFBundleVersion"),
+                   os.path.getsize(ipa), digest, sorted(set(slices)), sorted(plats)))
           print("IPA VERIFICATION: OK - cau truc Payload/%s hop le cho TrollStore."
                 % (apps[0][len("Payload/"):] if apps and apps[0].startswith("Payload/") else "?"))
           PY
