@@ -1,11 +1,24 @@
 import SwiftUI
+import Combine
 
 // =====================================================================
 // SETTINGS — bố cục 2 cột LANDSCAPE (chế độ TV):
-//   Trái: danh sách mục (Playback / Network / Live TV — URL kênh)
+//   Trái: danh sách mục (Playback / Trình phát PHIM / Network / Live TV —
+//         URL kênh)
 //   Phải: nội dung mục đã chọn (Form — giữ nguyên 100% logic hiện tại:
 //         Preferences, ChannelURLEditorRow, xác nhận khôi phục mặc định).
 // Chỉ thay đổi BỐ CỤC — không đổi logic Settings.
+//
+// [build 243 — 2026-09-17] THÊM MỤC "TRÌNH PHÁT PHIM":
+//   Module PHIM có HAI trình phát (trình phát TÍCH HỢP = thẻ <video> trong
+//   web app; trình phát iOS = AVPlayerViewController). Trước đây cả hai đều
+//   được nạp cho một lần phát → tốn băng thông, load lâu, dễ xung đột.
+//   Nay người dùng CHỌN MỘT; lựa chọn lưu UserDefaults (Preferences) nên giữ
+//   qua các lần đóng/mở app. Lần phát phim ĐẦU TIÊN khi chưa có lựa chọn thì
+//   module PHIM KHÔNG nạp player nào mà chuyển sang đây (`PhimPlayerChoiceCenter`
+//   → notification .binTVPhimPlayerChoiceNeeded): chọn xong tự quay lại PHIM
+//   và phát tiếp đúng phim/tập vừa chọn. Mục này LUÔN vào được từ SETTING để
+//   đổi trình phát bất cứ lúc nào.
 // =====================================================================
 
 struct SettingsView: View {
@@ -19,13 +32,19 @@ struct SettingsView: View {
     @State private var showResetConfirm = false
     /// Mục đang chọn ở cột phải (mặc định: Playback).
     @State private var selectedSection: SettingsSection = .playback
+    /// [build 243] Trình phát PHIM đã lưu (`nil` = người dùng chưa chọn).
+    @State private var phimPlayerChoice: PhimPlayerChoice? = Preferences.shared.phimPlayerChoice
+    /// [build 243] Phim/tập đang chờ chọn trình phát (hiện để người dùng biết
+    /// mình sẽ quay lại phát cái gì) — `nil` khi vào SETTING bình thường.
+    @State private var playerChoicePrompt: String? = nil
 
     private enum SettingsSection: Int, CaseIterable, Identifiable {
-        case playback, network, urls
+        case playback, phimPlayer, network, urls
         var id: Int { rawValue }
         var title: String {
             switch self {
             case .playback: return "Playback"
+            case .phimPlayer: return "Trình phát PHIM"
             case .network: return "Network"
             case .urls: return "Live TV — URL kênh"
             }
@@ -33,6 +52,7 @@ struct SettingsView: View {
         var icon: String {
             switch self {
             case .playback: return "play.rectangle"
+            case .phimPlayer: return "film"
             case .network: return "network"
             case .urls: return "tv"
             }
@@ -84,6 +104,9 @@ struct SettingsView: View {
                             .onChange(of: subtitleOn) { Preferences.shared.subtitleEnabled = $0 }
                     }
                 }
+                if selectedSection == .phimPlayer {
+                    phimPlayerSection
+                }
                 if selectedSection == .network {
                     Section(header: Text("Network")) {
                         Stepper("Default Server: \(serverIdx+1)", value: $serverIdx, in: 0...3)
@@ -106,6 +129,16 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("Settings")
+        // [build 243] Mục PHIM yêu cầu chọn trình phát → mở đúng mục + hiện
+        // phim/tập đang chờ. (Trang SETTING có thể chưa mount khi notification
+        // bắn ra → `onAppear`/`syncPhimPlayerChoiceState` bắt lại trường hợp đó.)
+        .onReceive(NotificationCenter.default.publisher(for: .binTVPhimPlayerChoiceNeeded)) { note in
+            let title = (note.userInfo?["title"] as? String) ?? ""
+            selectedSection = .phimPlayer
+            phimPlayerChoice = Preferences.shared.phimPlayerChoice
+            playerChoicePrompt = title.isEmpty ? "phim vừa chọn" : title
+        }
+        .onAppear { syncPhimPlayerChoiceState() }
         .confirmationDialog(
             "Khôi phục URL mặc định cho tất cả kênh?",
             isPresented: $showResetConfirm,
@@ -118,6 +151,71 @@ struct SettingsView: View {
         } message: {
             Text("URL đã chỉnh sửa sẽ trở về mặc định cho tất cả kênh. Các cài đặt khác không bị ảnh hưởng.")
         }
+    }
+
+    // =====================================================================
+    // [build 243] MỤC "TRÌNH PHÁT PHIM"
+    // Hai lựa chọn dùng ĐÚNG tên đang có trong source ("Trình phát tích hợp"
+    // / "Trình phát iOS"). Bấm là LƯU NGAY (UserDefaults) — không có nút Lưu
+    // riêng nên không thể rơi vào trạng thái "đã bấm mà chưa lưu".
+    // =====================================================================
+    private var phimPlayerSection: some View {
+        Section(header: Text("Trình phát PHIM")) {
+            if let prompt = playerChoicePrompt {
+                Text("Chọn trình phát để tiếp tục phát: \(prompt)")
+                    .font(.footnote)
+                    .foregroundColor(.orange)
+            }
+            if phimPlayerChoice == nil {
+                Text("Chưa chọn trình phát — module PHIM chưa tải video nào cho tới khi bạn chọn.")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
+            ForEach(PhimPlayerChoice.allCases) { choice in
+                Button {
+                    selectPhimPlayer(choice)
+                } label: {
+                    HStack(alignment: .center, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(choice.title)
+                                .font(.body)
+                                .foregroundColor(.primary)
+                            Text(choice.detail)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer(minLength: 0)
+                        if phimPlayerChoice == choice {
+                            Image(systemName: "checkmark")
+                                .foregroundColor(.accentColor)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+            Text("Chỉ trình phát được chọn mới tải video; trình phát còn lại không được khởi tạo.")
+                .font(.footnote)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    /// Đọc lại trạng thái từ nơi lưu THẬT (UserDefaults + trung tâm điều phối)
+    /// — cần khi trang SETTING vừa được mount bởi chính yêu cầu chọn trình phát.
+    private func syncPhimPlayerChoiceState() {
+        phimPlayerChoice = Preferences.shared.phimPlayerChoice
+        let center = PhimPlayerChoiceCenter.shared
+        guard center.hasPendingRequest else { return }
+        selectedSection = .phimPlayer
+        let title = center.pendingTitle
+        playerChoicePrompt = title.isEmpty ? "phim vừa chọn" : title
+    }
+
+    /// Lưu lựa chọn (UserDefaults) + báo quay lại PHIM để phát tiếp phim/tập
+    /// đang chờ. Đổi trình phát lúc KHÔNG có phim chờ thì chỉ lưu + ở lại đây.
+    private func selectPhimPlayer(_ choice: PhimPlayerChoice) {
+        phimPlayerChoice = choice
+        playerChoicePrompt = nil
+        PhimPlayerChoiceCenter.shared.save(choice)
     }
 }
 

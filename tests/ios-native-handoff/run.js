@@ -35,6 +35,13 @@
  *     tích hợp THẤT BẠI mới fallback (reason "web-streams-exhausted").
  *     Kèm cầu nối gesture: __bintvPhimReturn (Return trong web app) + tua
  *     __bintvPlayerBeginSeek/SeekTo/EndSeek + mirror uiState về Swift.
+ *     [build 243] Bỏ "leo thang" sang trình phát iOS khi người dùng ĐÃ CHỌN
+ *     trình phát tích hợp → F2 nay kiểm tra "một player duy nhất".
+ *   SUITE I (build 243) — MỘT TRÌNH PHÁT DUY NHẤT CHO MODULE PHIM:
+ *     Chưa chọn trình phát → KHÔNG nạp player nào + chuyển sang SETTING;
+ *     chọn xong → phát tiếp ĐÚNG phim/tập vừa chọn; đã chọn "native" → chỉ
+ *     AVPlayer nhận URL (thẻ <video> không bao giờ có src); đã chọn
+ *     "integrated" → chỉ <video> nhận URL; ngoài WKWebView iOS → hành vi cũ.
  *
  * Các hàm của SUITE B được TRÍCH TRỰC TIẾP từ app.js (không chép tay) nên
  * test luôn bám theo code thật.
@@ -92,7 +99,7 @@ function extractSwiftUserScripts() {
 
 const swiftScripts = extractSwiftUserScripts();
 
-function makeWindow(url, withBridge) {
+function makeWindow(url, withBridge, playerChoice) {
     const dom = new JSDOM(fs.readFileSync(path.join(WEB, "index.html"), "utf8"), {
         url: url,
         runScripts: "outside-only",
@@ -126,6 +133,11 @@ function makeWindow(url, withBridge) {
             }
         };
     }
+    // [build 243] Lựa chọn trình phát của module PHIM do Swift đẩy sang web
+    // app (`__bintvSetPhimPlayerChoice`) sau khi trang nạp xong / khi người
+    // dùng lưu trong SETTING. Mặc định "integrated" để các suite cũ vẫn mô tả
+    // đúng trường hợp "người dùng đã chọn trình phát tích hợp".
+    win.__bintvInitialPlayerChoice = (playerChoice === undefined) ? "integrated" : playerChoice;
     return win;
 }
 
@@ -140,6 +152,15 @@ function bootWebApp(win, scripts) {
             bad.push(item.label + ": " + e.message);
         }
     });
+    // [build 243] Swift đẩy trình phát ĐÃ LƯU sang web app ngay sau didFinish.
+    if (win.__bintvInitialPlayerChoice !== undefined) {
+        try {
+            win.eval("window.__bintvSetPhimPlayerChoice && window.__bintvSetPhimPlayerChoice("
+                + JSON.stringify(win.__bintvInitialPlayerChoice) + ");");
+        } catch (e) {
+            bad.push("playerChoice: " + e.message);
+        }
+    }
     return { ok: ok, bad: bad };
 }
 
@@ -150,6 +171,7 @@ function scriptList(withHls) {
         { label: "swift:viewportFixJS", code: swiftScripts.viewportFixJS },
         { label: "swift:bridgeShimJS", code: swiftScripts.bridgeShimJS },
         { label: "swift:nativeHandoffJS", code: swiftScripts.nativeHandoffJS },
+        { label: "swift:playerChoiceJS", code: swiftScripts.playerChoiceJS },
         { label: "swift:lifecycleBridgeJS", code: swiftScripts.lifecycleBridgeJS },
         { label: "swift:consoleCaptureJS", code: swiftScripts.consoleCaptureJS }
     ];
@@ -170,7 +192,8 @@ function scriptList(withHls) {
 // =====================================================================
 function suiteA() {
     console.log("\n=== SUITE A: cầu nối playVideoNative trong WKWebView iOS ===");
-    const win = makeWindow("http://127.0.0.1:3000/?android=phone&ios=landscape", true);
+    // [build 243] Suite này kiểm tra cầu nối sang trình phát iOS → người dùng đã chọn "native".
+    const win = makeWindow("http://127.0.0.1:3000/?android=phone&ios=landscape", true, "native");
     const boot = bootWebApp(win, scriptList(false));
     check("A", "mọi script nạp không lỗi (" + boot.ok.length + ")", boot.bad.length === 0, boot.bad.join(" | "));
 
@@ -378,7 +401,8 @@ function suiteB() {
 // =====================================================================
 function suiteC() {
     console.log("\n=== SUITE C: phụ đề đẩy sang trình phát native ===");
-    const win = makeWindow("http://127.0.0.1:3000/?android=phone&ios=landscape", true);
+    // [build 243] Suite này kiểm tra phụ đề trong trình phát iOS → người dùng đã chọn "native".
+    const win = makeWindow("http://127.0.0.1:3000/?android=phone&ios=landscape", true, "native");
     bootWebApp(win, scriptList(false));
 
     // Cầu nối Swift phải cung cấp __bintvSetNativeSubtitles.
@@ -777,16 +801,22 @@ function suiteF() {
     check("F", "→ overlay trình phát tích hợp đang mở",
           win.document.getElementById("bintv-movie-player").classList.contains("show"));
 
-    // --- F2: trình phát tích hợp THẤT BẠI → lúc này mới fallback sang iOS -
+    // --- F2: [build 243] người dùng ĐÃ CHỌN trình phát tích hợp → nguồn lỗi
+    //         cũng KHÔNG được mở trình phát còn lại (một player duy nhất).
+    //         (Hành vi cũ "leo thang sang trình phát iOS" đã bị gỡ: đó chính là
+    //         nguyên nhân HAI player cùng tải một URL — xem SUITE I.)
     hooks.playbackError();
     const handoff = win.__posted.filter(function (m) {
         return m.action !== "stop" && m.action !== "episodes" && m.action !== "hideEpisodes";
     });
-    check("F", "tích hợp lỗi (hết nguồn web) → handoff sang trình phát iOS",
-          handoff.length === 1, JSON.stringify(win.__posted));
-    check("F", "→ reason = web-streams-exhausted",
-          handoff.length === 1 && handoff[0].reason === "web-streams-exhausted",
-          handoff.length ? JSON.stringify(handoff[0]) : "không gửi gì");
+    check("F", "[243] đã chọn trình phát tích hợp + nguồn lỗi → KHÔNG mở trình phát iOS",
+          handoff.length === 0, JSON.stringify(win.__posted));
+    const statusF = (win.document.getElementById("bintv-movie-status") || {}).textContent || "";
+    check("F", "→ hiện lỗi THẬT + chỉ chỗ đổi trình phát (SETTING → Trình phát PHIM)",
+          statusF.indexOf("SETTING") !== -1 && statusF.indexOf("trên TV") === -1, statusF);
+    check("F", "→ trình phát tích hợp đã được dọn nguồn (không để <video> tải tiếp)",
+          !win.document.getElementById("bintv-movie-html5-player").getAttribute("src"),
+          String(win.document.getElementById("bintv-movie-html5-player").getAttribute("src")));
 
     // --- F3: cầu nối Return của web app ---------------------------------
     const winG = makeWindow("http://127.0.0.1:3000/?android=phone&ios=landscape", true);
@@ -1138,6 +1168,191 @@ function suiteH() {
           winL.__bintvOpenPlayerEpisodes() === false);
 }
 
+// =====================================================================
+// SUITE I — [build 243] MỘT TRÌNH PHÁT DUY NHẤT CHO MODULE PHIM
+//
+// Yêu cầu được kiểm tra:
+//   I1. CHƯA chọn trình phát → KHÔNG player nào nạp video; chuyển sang
+//       SETTING (message phimBridge action "needPlayerChoice"); nhớ đúng
+//       phim/tập đang chờ.
+//   I2. Chọn xong trong SETTING → Swift đẩy lựa chọn (resume=true) → phát
+//       TIẾP ĐÚNG phim/tập vừa chọn, chỉ bằng trình phát đã chọn.
+//   I3. Đã chọn "native" → CHỈ trình phát iOS nhận URL; thẻ <video> không
+//       bao giờ có src (không preload, không tạo instance chờ sẵn).
+//   I4. Đã chọn "integrated" → chỉ thẻ <video> nhận URL; nguồn lỗi cũng
+//       KHÔNG mở trình phát iOS.
+//   I5. Không có cầu nối iOS (Android/Tizen/Windows) → hành vi cũ giữ nguyên.
+//   I6. Wiring Swift: UserDefaults + mục SETTING + điều hướng tab + user script.
+// =====================================================================
+function suiteI() {
+    console.log("\n=== SUITE I (build 243): một trình phát duy nhất theo lựa chọn người dùng ===");
+    const appSrc = fs.readFileSync(path.join(ASSETS, "app.js"), "utf8");
+    const webViewSrc = fs.readFileSync(SWIFT_WEBVIEW, "utf8");
+    const prefsSrc = fs.readFileSync(path.join(REPO, "BinTV", "Storage", "Preferences.swift"), "utf8");
+    const settingsSrc = fs.readFileSync(path.join(REPO, "BinTV", "Views", "SettingsView.swift"), "utf8");
+    const contentSrc = fs.readFileSync(path.join(REPO, "BinTV", "Views", "ContentView.swift"), "utf8");
+    const URL1 = "https://cdn.vnstream.xyz/f/movie-a-ep5.m3u8?pkey=SECRET";
+    const TITLE1 = "Phim A · Tập 5";
+
+    function playPosts(win) {
+        return win.__posted.filter(function (m) {
+            return m.action !== "stop" && m.action !== "episodes" && m.action !== "hideEpisodes";
+        });
+    }
+    function videoSrc(win) {
+        const video = win.document.getElementById("bintv-movie-html5-player");
+        return video ? String(video.getAttribute("src") || "") : "";
+    }
+
+    // --- I1: CHƯA chọn trình phát → không nạp player nào, sang SETTING ----
+    const win = makeWindow("http://127.0.0.1:3000/?android=phone&ios=landscape", true, "");
+    bootWebApp(win, scriptList(false));
+    const hooks = win.__bintvMoviePlaybackHooks;
+    hooks.setBrowserOpen(true);
+    check("I", "cầu nối lựa chọn được tiêm từ Swift (playerChoiceJS)",
+          typeof win.__bintvPhimPlayerChoice === "function"
+          && typeof win.__bintvSetPhimPlayerChoice === "function");
+    check("I", "chưa lưu lựa chọn → movieChosenPlayer() = '' ", hooks.chosenPlayer() === "");
+    win.__posted.length = 0;
+    win.__bridgePosted.length = 0;
+    hooks.startPlayback(URL1, TITLE1, { name: "1080p", stream: { name: "1080p" } });
+    check("I", "chưa chọn trình phát → KHÔNG gửi gì sang trình phát iOS",
+          playPosts(win).length === 0, JSON.stringify(win.__posted));
+    check("I", "chưa chọn trình phát → thẻ <video> KHÔNG nhận src (không preload)",
+          videoSrc(win) === "", videoSrc(win));
+    check("I", "chưa chọn trình phát → overlay trình phát KHÔNG mở",
+          !win.document.getElementById("bintv-movie-player").classList.contains("show"));
+    const needMsg = win.__bridgePosted.filter(function (m) { return m.action === "needPlayerChoice"; });
+    check("I", "→ báo Swift chuyển sang SETTING (action=needPlayerChoice, kèm tên phim)",
+          needMsg.length === 1 && needMsg[0].title === TITLE1, JSON.stringify(win.__bridgePosted));
+    const pending = hooks.pendingPlayerChoice();
+    check("I", "→ nhớ ĐÚNG phim/tập đang chờ để phát tiếp",
+          !!pending && pending.title === TITLE1 && pending.url === URL1, JSON.stringify(pending));
+    const statusI1 = (win.document.getElementById("bintv-movie-status") || {}).textContent || "";
+    check("I", "→ hiện trạng thái rõ ràng cho người dùng",
+          /SETTING/.test(statusI1), statusI1);
+
+    // --- I2: chọn xong trong SETTING → phát tiếp đúng phim/tập ------------
+    win.__posted.length = 0;
+    const resumed = win.__bintvPhimPlayerChoiceSelected({ choice: "integrated", resume: true });
+    check("I", "lưu lựa chọn (resume) → phát lại phim/tập đang chờ", resumed === true);
+    check("I", "→ ĐÚNG trình phát đã chọn (tích hợp) nhận nguồn",
+          videoSrc(win).indexOf("movie-a-ep5") !== -1, videoSrc(win));
+    check("I", "→ vẫn KHÔNG mở trình phát iOS", playPosts(win).length === 0,
+          JSON.stringify(win.__posted));
+    check("I", "→ overlay trình phát mở", win.document.getElementById("bintv-movie-player")
+          .classList.contains("show"));
+    check("I", "→ yêu cầu chờ đã được giải toả", hooks.pendingPlayerChoice() === null);
+    check("I", "lần phát thứ 2 (đã lưu lựa chọn) → KHÔNG hỏi lại SETTING",
+          (function () {
+              win.__bridgePosted.length = 0;
+              hooks.startPlayback("https://cdn.vnstream.xyz/f/movie-b-ep1.mp4", "Phim B · Tập 1",
+                                  { name: "720p" });
+              const asked = win.__bridgePosted.filter(function (m) {
+                  return m.action === "needPlayerChoice";
+              });
+              return asked.length === 0 && videoSrc(win).indexOf("movie-b-ep1") !== -1;
+          })(), JSON.stringify(win.__bridgePosted));
+    check("I", "đẩy lựa chọn KHÔNG kèm resume → chỉ cập nhật, không tự phát phim cũ",
+          (function () {
+              const win2 = makeWindow("http://127.0.0.1:3000/?android=phone&ios=landscape", true, "");
+              bootWebApp(win2, scriptList(false));
+              win2.__bintvMoviePlaybackHooks.setBrowserOpen(true);
+              win2.__bintvMoviePlaybackHooks.startPlayback(URL1, TITLE1, { name: "1080p" });
+              const before = videoSrc(win2);
+              win2.__bintvPhimPlayerChoiceSelected({ choice: "integrated", resume: false });
+              return before === "" && videoSrc(win2) === ""
+                  && win2.__bintvMoviePlaybackHooks.chosenPlayer() === "integrated";
+          })());
+
+    // --- I3: đã chọn TRÌNH PHÁT iOS → chỉ AVPlayer nhận URL ---------------
+    const winN = makeWindow("http://127.0.0.1:3000/?android=phone&ios=landscape", true, "native");
+    bootWebApp(winN, scriptList(false));
+    const hooksN = winN.__bintvMoviePlaybackHooks;
+    hooksN.setBrowserOpen(true);
+    winN.__posted.length = 0;
+    hooksN.startPlayback(URL1, TITLE1, { name: "1080p AC3", stream: { name: "1080p AC3" } });
+    const nativePosts = playPosts(winN);
+    check("I", "đã chọn trình phát iOS → gửi ĐÚNG 1 yêu cầu phát cho AVPlayer",
+          nativePosts.length === 1, JSON.stringify(winN.__posted));
+    check("I", "→ lý do = user-chosen-native-player (không phải fallback do lỗi)",
+          nativePosts.length === 1 && nativePosts[0].reason === "user-chosen-native-player",
+          nativePosts.length ? nativePosts[0].reason : "không gửi gì");
+    check("I", "→ đúng URL người dùng chọn tập", nativePosts.length === 1
+          && nativePosts[0].url === URL1, nativePosts.length ? nativePosts[0].url : "");
+    check("I", "→ thẻ <video> KHÔNG BAO GIỜ nhận src (không tạo/preload player thứ 2)",
+          videoSrc(winN) === "", videoSrc(winN));
+    // Native fail → nguồn dự phòng kế tiếp VẪN đi qua trình phát iOS (không
+    // bao giờ kéo thẻ <video> vào).
+    winN.__posted.length = 0;
+    hooksN.setHandoffActive(true);
+    winN.__bintvNativePlaybackFailed({ session: nativePosts[0].session, message: "AVPlayerItem failed" });
+    check("I", "trình phát iOS lỗi → KHÔNG kéo trình phát tích hợp vào",
+          videoSrc(winN) === "", videoSrc(winN));
+
+    // --- I4: đã chọn TRÌNH PHÁT TÍCH HỢP → không preload sang iOS ---------
+    const winW = makeWindow("http://127.0.0.1:3000/?android=phone&ios=landscape", true, "integrated");
+    bootWebApp(winW, scriptList(false));
+    const hooksW = winW.__bintvMoviePlaybackHooks;
+    hooksW.setBrowserOpen(true);
+    winW.__posted.length = 0;
+    hooksW.startPlayback("https://cdn.vnstream.xyz/f/movie.mkv", "Phim MKV AC3",
+                         { name: "1080p AC3", stream: { name: "1080p AC3" } });
+    check("I", "đã chọn trình phát tích hợp → chỉ thẻ <video> nhận nguồn",
+          videoSrc(winW).indexOf("movie.mkv") !== -1 && playPosts(winW).length === 0,
+          videoSrc(winW) + " | " + JSON.stringify(winW.__posted));
+    winW.__posted.length = 0;
+    hooksW.playbackError();
+    check("I", "→ nguồn lỗi vẫn KHÔNG mở trình phát iOS (một player duy nhất)",
+          playPosts(winW).length === 0, JSON.stringify(winW.__posted));
+    // Handoff trực tiếp cũng bị chặn khi người dùng đã chọn trình phát tích hợp.
+    check("I", "→ __bintvRequestNativePlayback bị chặn khi đã chọn trình phát tích hợp",
+          winW.__bintvRequestNativePlayback("ios-fallback-error") === false);
+
+    // --- I5: không có cầu nối iOS → hành vi cũ (phát bằng thẻ <video>) ----
+    const winAndroid = makeWindow("http://127.0.0.1:3000/?android=phone", false, "");
+    bootWebApp(winAndroid, scriptList(false));
+    winAndroid.__bintvMoviePlaybackHooks.setBrowserOpen(true);
+    winAndroid.__bintvMoviePlaybackHooks.startPlayback(URL1, TITLE1, { name: "1080p" });
+    check("I", "Android/Tizen/Windows (không cầu nối) → phát như cũ, không hỏi SETTING",
+          String(winAndroid.document.getElementById("bintv-movie-html5-player")
+              .getAttribute("src") || "").indexOf("movie-a-ep5") !== -1);
+
+    // --- I6: wiring Swift (nguồn) ----------------------------------------
+    check("I", "Preferences: enum PhimPlayerChoice {integrated, native}",
+          /enum PhimPlayerChoice: String/.test(prefsSrc)
+          && /case integrated/.test(prefsSrc) && /case native/.test(prefsSrc));
+    check("I", "Preferences: lưu UserDefaults (giữ qua các lần đóng/mở app)",
+          /defaults\.set\(newValue\.rawValue, forKey: Self\.phimPlayerChoiceKey\)/.test(prefsSrc)
+          && /phimPlayerChoiceKey = "phimPlayerChoice"/.test(prefsSrc));
+    check("I", "Preferences: chưa chọn = nil (không mặc định thay người dùng)",
+          /var phimPlayerChoice: PhimPlayerChoice\?/.test(prefsSrc));
+    check("I", "SETTINGS có mục 'Trình phát PHIM' với đúng tên 2 trình phát",
+          /return "Trình phát PHIM"/.test(settingsSrc)
+          && /return "Trình phát tích hợp"/.test(prefsSrc)
+          && /return "Trình phát iOS"/.test(prefsSrc));
+    check("I", "SETTINGS lưu lựa chọn qua PhimPlayerChoiceCenter.save",
+          /PhimPlayerChoiceCenter\.shared\.save\(choice\)/.test(settingsSrc));
+    check("I", "SETTINGS luôn vào được (mục trong cột trái, không chỉ khi bị chuyển sang)",
+          /case playback, phimPlayer, network, urls/.test(settingsSrc));
+    check("I", "ContentView: needPlayerChoice → chuyển sang tab SETTING",
+          /binTVPhimPlayerChoiceNeeded/.test(contentSrc)
+          && /selectTab\(BinTVPage\.settings\.rawValue\)/.test(contentSrc));
+    check("I", "ContentView: lưu lựa chọn (có phim chờ) → quay lại tab PHIM",
+          /binTVPhimPlayerChoiceSaved/.test(contentSrc)
+          && /selectTab\(BinTVPage\.phim\.rawValue\)/.test(contentSrc));
+    check("I", "PhimWebView: user script playerChoiceJS tiêm ở document-start",
+          /Self\.playerChoiceJS/.test(webViewSrc)
+          && /__bintvPhimPlayerChoice = function/.test(webViewSrc));
+    check("I", "PhimWebView: xử lý message needPlayerChoice",
+          /case "needPlayerChoice"/.test(webViewSrc));
+    check("I", "PhimWebView: đẩy lựa chọn đã lưu sang web app (didFinish + khi lưu)",
+          /pushPhimPlayerChoice\(resume: false\)/.test(webViewSrc)
+          && /forName: \.binTVPhimPlayerChoiceSaved/.test(webViewSrc));
+    check("I", "app.js: không còn đường 'leo thang' khi người dùng đã chọn tích hợp",
+          /movieUserChoseIntegratedPlayer\(\)/.test(appSrc));
+}
+
 async function main() {
     suiteA();
     suiteB();
@@ -1146,6 +1361,7 @@ async function main() {
     suiteF();
     suiteG();
     suiteH();
+    suiteI();
     await suiteD();
     console.log("\n=========================================");
     console.log("PASS: " + pass + "   FAIL: " + fail);

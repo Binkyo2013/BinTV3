@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import WebKit
+import Combine
 
 // =====================================================================
 // ContentView — FULLSCREEN THẬT SỰ + MENU ẨN MẶC ĐỊNH +
@@ -231,6 +232,27 @@ struct ContentView: View {
             // (chuyển qua lại nhiều lần không bao giờ mount lại).
             mountedTabs.insert(tab)
         }
+        // =================================================================
+        // [build 243 — 2026-09-17] ĐIỀU HƯỚNG PHIM ↔ SETTING ĐỂ CHỌN TRÌNH PHÁT
+        //
+        // Module PHIM chỉ phát bằng MỘT trình phát do người dùng chọn (lưu
+        // UserDefaults — xem Preferences.swift / SettingsView). Lần phát đầu
+        // tiên khi chưa có lựa chọn, web app PHIM KHÔNG nạp player nào mà
+        // báo lên đây → chuyển sang tab SETTING (mục "Trình phát PHIM").
+        // Chọn xong → quay lại tab PHIM; web app tự phát tiếp ĐÚNG phim/tập
+        // người dùng vừa chọn (cờ resume của PhimPlayerChoiceCenter).
+        // =================================================================
+        .onReceive(NotificationCenter.default.publisher(for: .binTVPhimPlayerChoiceNeeded)) { _ in
+            selectTab(BinTVPage.settings.rawValue)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .binTVPhimPlayerChoiceSaved)) { note in
+            // Chỉ tự quay lại PHIM khi CÓ phim/tập đang chờ (người dùng được
+            // PHIM chuyển sang đây). Đổi trình phát lúc đang duyệt SETTING thì
+            // giữ nguyên chỗ — không kéo người dùng đi đâu cả.
+            let resume = (note.userInfo?["resume"] as? Bool) ?? false
+            guard resume else { return }
+            selectTab(BinTVPage.phim.rawValue)
+        }
     }
 
     // =================================================================
@@ -306,6 +328,14 @@ struct ContentView: View {
         selectedTab = tab
         mountedTabs.insert(tab)
         if tabHistory.last != tab { tabHistory.append(tab) }
+        // [build 243] Rời SETTING mà CHƯA chọn trình phát (về PHIM hoặc bất kỳ
+        // tab nào khác) → bỏ yêu cầu đang chờ. Nhờ vậy web app KHÔNG tự phát
+        // lại phim cũ khi người dùng vào SETTING đổi trình phát vào lúc khác;
+        // lần bấm phim kế tiếp sẽ hỏi lại. (Trong luồng bình thường, lựa chọn
+        // đã được LƯU trước khi quay về PHIM nên đây chỉ là no-op.)
+        if tab != BinTVPage.settings.rawValue {
+            PhimPlayerChoiceCenter.shared.cancelPending()
+        }
     }
 
     // =================================================================

@@ -1,10 +1,11 @@
 # BinTV iOS — TrollStore Build (FIXED)
 
-> **Bản mới nhất: 2.5.8 (build 242)** — **GỠ nút "TẬP" + TÊN PHIM khỏi màn
-> hình trình phát**: player iOS giữ nguyên giao diện mặc định, player web chỉ
-> còn dòng trạng thái; **TẬP chỉ còn trong MENU LONG-PRESS** (giữ màn hình
-> khi đang phát → LIVE TV · TUBE · SETTING · TẬP · BACK; phim lẻ 1 tập không
-> có TẬP). Chi tiết: mục `### Build 242 (2.5.8)` ở cuối file · Cách lấy file:
+> **Bản mới nhất: 2.5.9 (build 243)** — **MODULE PHIM CHỈ DÙNG MỘT TRÌNH
+> PHÁT** do người dùng chọn ở **SETTING → "Trình phát PHIM"** (lưu
+> UserDefaults): chưa chọn thì KHÔNG nạp player nào mà chuyển sang SETTING,
+> chọn xong tự quay lại PHIM và phát tiếp đúng phim/tập vừa chọn; từ đó chỉ
+> trình phát được chọn mới tải video (hết cảnh 2 player cùng load 1 URL).
+> Chi tiết: mục `### Build 243 (2.5.9)` ở cuối file · Cách lấy file:
 > artifact `BinTV-trollstore-unsigned` (chứa `BinTV.ipa`) của workflow
 > "Build unsigned IPA (TrollStore)".
 
@@ -722,3 +723,92 @@ index.html/app.js/CSS/Swift không còn nút TẬP & tên phim, native không
 player không có `<button>` nào / không hiện tên phim (kể cả khi player được
 dựng lại), và gọi điểm vào TẬP vẫn mở đúng danh sách 3 tập — phim lẻ trả
 `false`). Compile Swift do GitHub Actions xác nhận.
+
+### Build 243 (2.5.9) — PHIM chỉ dùng MỘT trình phát do người dùng chọn (SETTING → "Trình phát PHIM")
+
+**Vấn đề (đúng triệu chứng):** module PHIM có HAI trình phát — TRÌNH PHÁT
+TÍCH HỢP (thẻ `<video>` trong web app `app.js`) và TRÌNH PHÁT iOS
+(`AVPlayerViewController` của `PhimNativePlayerController`). Mỗi lần phát đều
+bắt đầu bằng trình phát tích hợp rồi "leo thang" sang trình phát iOS khi nguồn
+lỗi, và khi leo thang thẻ `<video>` **vẫn giữ `src`** → HAI player cùng tải
+MỘT URL: tốn băng thông, load lâu, tốn CPU/RAM, dễ xung đột.
+
+**Nguyên nhân gốc (đã xác minh bằng jsdom trên code thật):**
+`requestNativeMoviePlayback()` gửi `streamUrl` sang Swift nhưng KHÔNG gỡ nguồn
+của thẻ `<video>`; sau handoff, `video.src` vẫn là
+`http://127.0.0.1:PORT/proxy?url=…` trong lúc AVPlayer nạp cùng URL đó.
+
+**Luồng mới**
+
+```text
+Lần đầu (chưa có trình phát được lưu):
+PHIM → chọn phim → chọn tập
+  → KHÔNG nạp player nào (không <video>, không AVPlayer)
+  → SETTING (mục "Trình phát PHIM")
+  → chọn "Trình phát tích hợp" hoặc "Trình phát iOS"  → lưu UserDefaults
+  → tự quay lại PHIM → phát ĐÚNG phim/tập vừa chọn bằng trình phát đã chọn
+
+Từ lần sau:
+PHIM → chọn phim → chọn tập → đọc trình phát đã lưu
+  → chỉ khởi tạo/nạp ĐÚNG trình phát đó → phát
+```
+
+**1. Lưu lựa chọn — `BinTV/Storage/Preferences.swift`**
+- `enum PhimPlayerChoice { case integrated, native }` — nhãn dùng ĐÚNG tên
+  đang có trong source: **"Trình phát tích hợp"** / **"Trình phát iOS"**.
+- `Preferences.phimPlayerChoice: PhimPlayerChoice?` lưu ở **UserDefaults**
+  (khoá `phimPlayerChoice`) → giữ qua các lần đóng/mở app; `nil` = chưa chọn
+  (không tự chọn thay người dùng).
+- `PhimPlayerChoiceCenter` (singleton) + 2 notification
+  `.binTVPhimPlayerChoiceNeeded` / `.binTVPhimPlayerChoiceSaved` nối 3 nơi:
+  web app PHIM ↔ ContentView (đổi tab) ↔ SettingsView (chọn + lưu).
+
+**2. SETTING — `BinTV/Views/SettingsView.swift`**
+- Mục mới **"Trình phát PHIM"** trong cột trái (Playback · Trình phát PHIM ·
+  Network · Live TV — URL kênh), giao diện giữ đúng style Form hiện có; bấm là
+  LƯU NGAY (không có trạng thái "đã bấm mà chưa lưu"), có dấu ✓ ở lựa chọn
+  đang dùng. Mục này **luôn vào được** để đổi trình phát bất cứ lúc nào.
+- Khi bị PHIM chuyển sang: tự mở đúng mục + hiện "Chọn trình phát để tiếp tục
+  phát: <phim · tập>".
+
+**3. Điều hướng — `BinTV/Views/ContentView.swift`**
+- `.binTVPhimPlayerChoiceNeeded` → `selectTab(SETTING)`;
+  `.binTVPhimPlayerChoiceSaved` (có phim chờ) → `selectTab(PHIM)`.
+- Rời SETTING mà chưa chọn → huỷ yêu cầu chờ (không tự phát lại phim cũ khi
+  người dùng vào SETTING đổi trình phát vào lúc khác).
+
+**4. Web app — `BinTV/Phim/Web/assets/app.js`**
+- `startMoviePlayback()` kiểm tra lựa chọn NGAY TRƯỚC KHI nạp nguồn:
+  chưa chọn → gửi `phimBridge {action:"needPlayerChoice"}` + nhớ phim/tập chờ
+  (KHÔNG gán `src`, KHÔNG mở player); `"native"` →
+  `startMoviePlaybackOnChosenNativePlayer()` (chỉ AVPlayer nhận URL);
+  `"integrated"` → nhánh `<video>` như cũ.
+- `requestNativeMoviePlayback()` **từ chối** mở trình phát iOS khi người dùng
+  đã chọn trình phát tích hợp → nguồn lỗi thì báo lỗi THẬT + chỉ chỗ đổi
+  ("Có thể đổi trình phát trong SETTING → Trình phát PHIM"), không âm thầm mở
+  player còn lại.
+- `releaseMovieIntegratedPlayerSource()` (gỡ `src` + `load()`) chạy mỗi lần
+  handoff → không bao giờ còn cảnh hai player cùng tải một URL.
+- `window.__bintvPhimPlayerChoiceSelected({choice, resume})` do Swift gọi: cập
+  nhật lựa chọn và (khi `resume`) phát tiếp đúng phim/tập đang chờ.
+
+**5. Cầu nối Swift — `BinTV/Phim/PhimWebView.swift`**
+- User script MỚI `playerChoiceJS` (document-start): `__bintvPhimPlayerChoice()`
+  / `__bintvSetPhimPlayerChoice()` / `__bintvRequestPhimPlayerChoice(title)`.
+- Message MỚI `phimBridge` action `"needPlayerChoice"` → `PhimPlayerChoiceCenter`.
+- `pushPhimPlayerChoice(resume:)` đẩy giá trị đã lưu sang web app sau mỗi
+  `didFinish` và mỗi khi người dùng lưu trong SETTING.
+
+**Không đổi:** LIVE TV, TUBE, SETTING hiện có, giao diện BinTV, navigation,
+tìm kiếm/danh sách/lọc/sắp xếp phim, danh sách tập, nguồn phim + URL nguồn,
+logic xử lý URL video, fullscreen, gesture, phụ đề, luồng hết tập của
+build 233–236. Ngoài WKWebView iOS (Android/Tizen/Windows) hành vi cũ 100%.
+
+**Kiểm chứng:** `cd tests/ios-native-handoff && npm test` → **274/274 PASS**
+(237 cũ — trong đó SUITE A/C chạy với lựa chọn "native", 2 check SUITE F cập
+nhật theo chính sách một-trình-phát + **SUITE I** mới 36 check: chưa chọn →
+không player nào nạp video + sang SETTING + nhớ đúng phim/tập; chọn xong →
+phát tiếp đúng phim/tập; "native" → chỉ AVPlayer nhận URL và `<video>` không
+bao giờ có `src`; "integrated" → chỉ `<video>` nhận URL, lỗi vẫn không mở
+AVPlayer; không cầu nối iOS → hành vi cũ; wiring Swift/UserDefaults/SETTING).
+Compile Swift do GitHub Actions xác nhận.
