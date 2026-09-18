@@ -1443,6 +1443,58 @@ function suiteJ() {
           /player\?\.pause\(\)/.test(showBody));
 }
 
+// These are DOM/event tests, not an iPhone/WebKit fullscreen simulation.
+function suiteK() {
+    console.log("\n=== SUITE K: retained PHIM player across Home events ===");
+    for (const paused of [false, true]) {
+        const win = makeWindow("http://127.0.0.1:3000/?android=phone&ios=landscape", true);
+        bootWebApp(win, scriptList(false));
+        const video = win.document.getElementById("bintv-movie-html5-player");
+        check("K", "HTML5 video exists", !!video);
+        let mutations = 0;
+        video.play = function () { mutations++; return Promise.resolve(); };
+        video.pause = function () { mutations++; };
+        video.load = function () { mutations++; };
+        Object.defineProperty(video, "paused", { configurable: true, value: paused });
+        video.currentTime = 123.5;
+        video.controls = true;
+        const parent = video.parentNode;
+        const preference = win.__bintvInitialPlayerChoice;
+        for (let i = 0; i < 10; i++) {
+            win.__bintvPhimHostLifecycle.capture("native-willResignActive");
+            Object.defineProperty(win.document, "hidden", { configurable: true, value: true });
+            win.document.dispatchEvent(new win.Event("visibilitychange"));
+            win.dispatchEvent(new win.Event("pagehide"));
+            Object.defineProperty(win.document, "hidden", { configurable: true, value: false });
+            win.dispatchEvent(new win.Event("pageshow"));
+            win.document.dispatchEvent(new win.Event("visibilitychange"));
+        }
+        check("K", "Home events keep same video and parent: paused=" + paused,
+              win.document.getElementById(video.id) === video && video.parentNode === parent);
+        check("K", "Home events do not call play/pause/load", mutations === 0, mutations);
+        check("K", "position, controls and pause remain owned by video",
+              video.currentTime === 123.5 && video.controls && video.paused === paused);
+        check("K", "Home events do not switch player or request native playback",
+              preference === win.__bintvInitialPlayerChoice && win.__posted.length === 0);
+        win.close();
+    }
+    const swift = fs.readFileSync(SWIFT_WEBVIEW, "utf8");
+    const probe = swift.slice(swift.indexOf("    private func probeLiveWebView("),
+                              swift.indexOf("    private func safeProbeSummary("));
+    check("K", "timeout/evaluator failure defer instead of rebuilding live fullscreen",
+          probe.includes('deferForegroundProbe(reason: "evaluator unavailable"')
+          && probe.includes('deferForegroundProbe(reason: "probe timeout')
+          && !probe.includes('rebuildWebView(reason: "WKWebView did not answer'));
+    check("K", "no forced recreation for missing presenting hierarchy",
+          !swift.includes("waitForWebViewAttachment") && !swift.includes("hasUsableWebViewHierarchy"));
+    const scene = swift.slice(swift.indexOf("    private func scenePhaseDidChange("),
+                              swift.indexOf("    /// Save state before suspension"));
+    check("K", "scene inactive/background/active use native-aware app lifecycle path",
+          scene.includes("applicationWillResignActive()")
+          && scene.includes("applicationDidEnterBackground()")
+          && scene.includes("applicationDidBecomeActive()"));
+}
+
 async function main() {
     suiteA();
     suiteB();
@@ -1453,6 +1505,7 @@ async function main() {
     suiteH();
     suiteI();
     suiteJ();
+    suiteK();
     await suiteD();
     console.log("\n=========================================");
     console.log("PASS: " + pass + "   FAIL: " + fail);

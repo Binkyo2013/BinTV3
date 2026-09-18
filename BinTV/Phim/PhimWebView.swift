@@ -1672,6 +1672,7 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     private var foregroundRestoreScheduled = false
     private var foregroundRestoreInProgress = false
     private var queuedRestoreReason: String?
+    private var lifecycleIsSuspended = false
     private var lifecycleEpoch = 0
     private var recoveryAttempts = 0
     private var awaitingStateRestoreAfterLoad = false
@@ -1733,7 +1734,10 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     }
 
     private func applicationWillResignActive() {
-        guard started else { return }
+        // UIApplication + SwiftUI scenePhase can report the same transition.
+        // Capture once, before our own pause, not again from the second relay.
+        guard started, !lifecycleIsSuspended else { return }
+        lifecycleIsSuspended = true
         lifecycleEpoch += 1
         // Any in-flight evaluateJavaScript callback belongs to the old active
         // epoch. It must not block the next didBecomeActive recovery.
@@ -1748,6 +1752,7 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
 
     private func applicationDidEnterBackground() {
         guard started else { return }
+        applicationWillResignActive() // fallback if scene skipped .inactive
         foregroundRestoreNeeded = true
         nativePlayer.applicationDidEnterBackground()
         PhimDebugLog.step("LIFECYCLE", "PHIM didEnterBackground", "snapshot")
@@ -1764,7 +1769,8 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     }
 
     private func applicationDidBecomeActive() {
-        guard started else { return }
+        guard started, isApplicationActive else { return }
+        lifecycleIsSuspended = false
         nativePlayer.applicationDidBecomeActive()
         scheduleForegroundRepair(reason: "didBecomeActive")
     }
@@ -1774,12 +1780,11 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
               let phase = notification.userInfo?["phase"] as? String else { return }
         switch phase {
         case "inactive":
-            foregroundRestoreNeeded = true
-            captureLifecycleState(reason: "sceneInactive")
+            applicationWillResignActive()
         case "background":
-            foregroundRestoreNeeded = true
+            applicationDidEnterBackground()
         case "active":
-            scheduleForegroundRepair(reason: "scenePhaseActive")
+            applicationDidBecomeActive()
         default:
             break
         }
@@ -1868,8 +1873,8 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     }
 
     /// Called by the UIViewRepresentable host after it attaches the current
-    /// web view with real constraints. A missing window/superview is treated as
-    /// a recovery signal only after the scene becomes active.
+    /// web view with real constraints. Attachment is a chance to retry a probe,
+    /// not evidence that a covered/detached fullscreen presenter was broken.
     func webViewDidAttachToContainer() {
         let size = webView.bounds.size
         PhimDebugLog.step("WEBVIEW", "hostAttach", "ok",
@@ -1922,9 +1927,9 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         }
     }
 
-    /// The decision tree intentionally starts with the least invasive action:
-    /// repaint + probe a live page. It recreates only a terminated, detached,
-    /// external-navigated, or non-responsive WKWebView.
+    /// Fullscreen UIKit presentation may detach the presenting view from its
+    /// window. That is NOT WebContent death. Probe the retained page even when
+    /// covered/detached; only confirmed page/process loss warrants recreation.
     private func beginForegroundRepair(reason: String, epoch: Int) {
         guard started, isApplicationActive, lifecycleEpoch == epoch else { return }
         guard !foregroundRestoreInProgress else {
@@ -1936,10 +1941,6 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         PhimDebugLog.step("LIFECYCLE", "foregroundRepair", "begin",
                           "reason=\(reason) processTerminated=\(contentProcessTerminated) generation=\(webViewGeneration)")
 
-        if !hasUsableWebViewHierarchy() {
-            waitForWebViewAttachment(reason: reason, epoch: epoch, attempt: 0)
-            return
-        }
         if contentProcessTerminated {
             rebuildWebView(reason: "WebContent process terminated")
             return
@@ -1949,40 +1950,6 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
             return
         }
         probeLiveWebView(reason: reason, epoch: epoch)
-    }
-
-    private func waitForWebViewAttachment(reason: String, epoch: Int, attempt: Int) {
-        guard lifecycleEpoch == epoch, isApplicationActive else {
-            finishForegroundRepair(expectedEpoch: epoch)
-            return
-        }
-        if hasUsableWebViewHierarchy() {
-            beginForegroundRepairAfterAttachment(reason: reason, epoch: epoch)
-            return
-        }
-        guard attempt < 3 else {
-            PhimDebugLog.step("WEBVIEW", "hierarchy", "missing",
-                              "superview/window unavailable after foreground; recreating")
-            rebuildWebView(reason: "view hierarchy missing after foreground")
-            return
-        }
-        PhimDebugLog.step("WEBVIEW", "hierarchy", "waiting",
-                          "attempt=\(attempt + 1) hierarchy=\(webHierarchy())")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
-            self?.waitForWebViewAttachment(reason: reason, epoch: epoch, attempt: attempt + 1)
-        }
-    }
-
-    private func beginForegroundRepairAfterAttachment(reason: String, epoch: Int) {
-        guard lifecycleEpoch == epoch, isApplicationActive else {
-            finishForegroundRepair(expectedEpoch: epoch)
-            return
-        }
-        if contentProcessTerminated || webView.url == nil || !(webView.url.map { self.isLocalPhimPage($0) } ?? false) {
-            rebuildWebView(reason: contentProcessTerminated ? "terminated while waiting for host" : "invalid page after host attach")
-        } else {
-            probeLiveWebView(reason: reason, epoch: epoch)
-        }
     }
 
     private func probeLiveWebView(reason: String, epoch: Int) {
@@ -2011,14 +1978,17 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
             guard let self = self, let view = view,
                   self.webView === view,
                   self.webViewGeneration == generation,
-                  self.lifecycleEpoch == epoch else { return }
+                  self.lifecycleEpoch == epoch,
+                  !answered.value else { return }
             answered.value = true
             guard self.isApplicationActive else {
                 self.finishForegroundRepair(expectedEpoch: epoch)
                 return
             }
             guard error == nil, let result = value as? String, !result.isEmpty else {
-                self.rebuildWebView(reason: "live page probe returned an error")
+                // A suspended WebKit fullscreen surface can temporarily reject
+                // JS. Do not destroy its video/presentation on a probe failure.
+                self.deferForegroundProbe(reason: "evaluator unavailable", epoch: epoch)
                 return
             }
             PhimDebugLog.step("WEBVIEW", "foregroundProbe", "ok",
@@ -2046,8 +2016,19 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
                   self.lifecycleEpoch == epoch,
                   !answered.value,
                   self.isApplicationActive else { return }
-            self.rebuildWebView(reason: "WKWebView did not answer foreground probe")
+            answered.value = true
+            self.deferForegroundProbe(reason: "probe timeout (not process death)", epoch: epoch)
         }
+    }
+
+    /// Retry on the next active/host-attachment event, not in a reload loop.
+    /// A real process termination has its own authoritative delegate callback.
+    private func deferForegroundProbe(reason: String, epoch: Int) {
+        foregroundRestoreNeeded = true
+        queuedRestoreReason = nil
+        PhimDebugLog.step("WEBVIEW", "foregroundProbe", "defer",
+                          "reason=\(reason) nativePresented=\(nativePlayer.isPresented) hierarchy=\(webHierarchy())")
+        finishForegroundRepair(expectedEpoch: epoch)
     }
 
     private func safeProbeSummary(_ result: String) -> String {
@@ -2082,6 +2063,9 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         let actualBrowser = (actual["browserOpen"] as? Bool) ?? false
         let actualPlayer = (actual["playerOpen"] as? Bool) ?? false
         let hasAPI = (actual["api"] as? Bool) ?? false
+        // The live player owns its controls/fullscreen, even if its browser
+        // shell is hidden. Never replay its source to repair a covered browser.
+        if expectedPlayer && actualPlayer { return false }
         if (expectedBrowser && !actualBrowser) || (expectedPlayer && !actualPlayer) {
             // If the page itself is alive but app.js did not initialise, force
             // a fresh host page rather than endlessly calling a missing API.
@@ -2226,11 +2210,6 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
                 self?.scheduleForegroundRepair(reason: queued, delay: 0.05)
             }
         }
-    }
-
-    private func hasUsableWebViewHierarchy() -> Bool {
-        let size = webView.bounds.size
-        return webView.superview != nil && webView.window != nil && size.width > 1 && size.height > 1
     }
 
     private func webHierarchy() -> String {

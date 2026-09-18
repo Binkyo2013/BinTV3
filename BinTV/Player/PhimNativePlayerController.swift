@@ -155,9 +155,9 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
     private var waitingForNextInstruction = false
     private var pendingInitialSeek: CMTime?
     private var shouldPlayWhenReady = true
-    private var lifecycleResumePosition: CMTime?
-    private var lifecycleShouldResume = false
-    private var lifecycleResumeWork: DispatchWorkItem?
+    private var lifecycleIsSuspended = false
+    private var lifecycleResumeRate: Float = 0
+    private var lifecycleGeneration = 0
 
     /// Đã báo "bắt đầu phát" cho JS (chỉ 1 lần / phiên).
     private var startedReported = false
@@ -252,15 +252,20 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
                 let target = max(0, seconds)
                 let wasPlaying = player.rate > 0
                 let time = CMTime(seconds: target, preferredTimescale: 600)
+                let generation = self.lifecycleGeneration
+                let item = player.currentItem
                 player.seek(to: time,
                             toleranceBefore: CMTime(seconds: 0.25, preferredTimescale: 600),
                             toleranceAfter: CMTime(seconds: 0.25, preferredTimescale: 600)) { _ in
                     // Chỉ tự phát lại nếu TRƯỚC ĐÓ đang phát (người dùng đang
                     // tạm dừng thì tua xong vẫn tạm dừng).
-                    guard wasPlaying, !self.waitingForNextInstruction else { return }
+                    guard wasPlaying, !self.waitingForNextInstruction,
+                          !self.lifecycleIsSuspended,
+                          self.lifecycleGeneration == generation,
+                          UIApplication.shared.applicationState == .active,
+                          self.player === player, player.currentItem === item else { return }
                     player.play()
                 }
-                self.lifecycleResumePosition = time
                 PhimDebugLog.step("GESTURE", "nativeSeek", "go",
                                   "target=\(Int(target.rounded()))s wasPlaying=\(wasPlaying)")
             },
@@ -376,10 +381,6 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
             ? CMTime(seconds: requestedPosition, preferredTimescale: 600)
             : nil
         shouldPlayWhenReady = !request.resumePaused
-        lifecycleResumePosition = nil
-        lifecycleShouldResume = false
-        lifecycleResumeWork?.cancel()
-        lifecycleResumeWork = nil
         candidates = Self.makeCandidates(for: request)
         candidateIndex = 0
 
@@ -413,55 +414,42 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
 
     // MARK: - Application lifecycle / WebView state reconciliation
 
-    /// Snapshot the native player independently of the WKWebView.  Safari and
-    /// Home can suspend WebKit while AVKit remains presented; holding position
-    /// + user intent here prevents an accidental restart or unwanted autoplay.
+    /// Retain the existing AVPlayer, item and fullscreen controller. Snapshot
+    /// once across app/scene notifications, before pausing for suspension.
     func applicationWillResignActive() {
-        guard let player = player, player.currentItem != nil else { return }
-        let position = player.currentTime()
-        lifecycleResumePosition = position.isNumeric && position.seconds >= 0 ? position : nil
-        lifecycleShouldResume = player.rate > 0
-            || player.timeControlStatus == .waitingToPlayAtSpecifiedRate
-        if lifecycleShouldResume { player.pause() }
-        PhimDebugLog.step("NATIVE", "willResignActive", "snapshot",
-                          "session=\(request?.session ?? "-") positionMs=\(Int((lifecycleResumePosition?.seconds ?? 0) * 1000)) resume=\(lifecycleShouldResume)")
+        guard !lifecycleIsSuspended,
+              let player = player, player.currentItem != nil else { return }
+        lifecycleIsSuspended = true
+        lifecycleGeneration += 1
+        lifecycleResumeRate = player.rate > 0 ? player.rate
+            : (player.timeControlStatus == .waitingToPlayAtSpecifiedRate ? 1 : 0)
+        shouldPlayWhenReady = lifecycleResumeRate > 0
+        if lifecycleResumeRate > 0 { player.pause() }
+        PhimDebugLog.step("NATIVE", "willResignActive", "retained",
+                          "session=\(request?.session ?? "-") resumeRate=\(lifecycleResumeRate) fullscreen=\(isPresented)")
     }
 
     func applicationDidEnterBackground() {
+        applicationWillResignActive() // idempotent, including scene-only delivery
         guard player?.currentItem != nil else { return }
         PhimDebugLog.step("NATIVE", "didEnterBackground", "held",
                           "session=\(request?.session ?? "-")")
     }
 
-    /// Resume only a player that was genuinely playing before suspension. A
-    /// manually paused native player remains paused after Home/Safari return.
+    /// No seek, delayed play, re-presentation, gravity or controls assignment.
+    /// The retained item is already at the paused position. A paused snapshot
+    /// requires NO player mutation; a playing snapshot resumes at its old rate.
     func applicationDidBecomeActive() {
-        guard lifecycleShouldResume,
-              let activePlayer = player,
-              activePlayer.currentItem != nil,
-              let session = request?.session else { return }
-        lifecycleResumeWork?.cancel()
-        let position = lifecycleResumePosition
-        lifecycleShouldResume = false
-        let work = DispatchWorkItem { [weak self] in
-            guard let self = self,
-                  self.player === activePlayer,
-                  self.request?.session == session,
-                  activePlayer.currentItem != nil else { return }
-            let resume: () -> Void = {
-                guard self.request?.session == session else { return }
-                activePlayer.play()
-                PhimDebugLog.step("NATIVE", "didBecomeActive", "resumed",
-                                  "session=\(session) positionMs=\(Int((position?.seconds ?? 0) * 1000))")
-            }
-            if let position = position, position.isNumeric, position.seconds > 0 {
-                activePlayer.seek(to: position, toleranceBefore: .zero, toleranceAfter: .zero) { _ in resume() }
-            } else {
-                resume()
-            }
-        }
-        lifecycleResumeWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+        guard lifecycleIsSuspended,
+              UIApplication.shared.applicationState == .active else { return }
+        let resumeRate = lifecycleResumeRate
+        lifecycleIsSuspended = false
+        lifecycleResumeRate = 0
+        guard resumeRate > 0, let player = player,
+              player.currentItem != nil else { return }
+        player.rate = resumeRate
+        PhimDebugLog.step("NATIVE", "didBecomeActive", "retained",
+                          "session=\(request?.session ?? "-") resumeRate=\(resumeRate) fullscreen=\(isPresented)")
     }
 
     /// A recreated WKWebView has no memory of the AVPlayer overlay. Re-emit a
@@ -607,7 +595,7 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
         activePlayer.replaceCurrentItem(with: item)
         // play() trước khi ready là HỢP LỆ: AVPlayer tự phát khi item sẵn sàng.
         // A restored user-paused player deliberately remains paused.
-        if shouldPlayWhenReady { activePlayer.play() } else { activePlayer.pause() }
+        if shouldPlayWhenReady && !lifecycleIsSuspended { activePlayer.play() } else { activePlayer.pause() }
         armCandidateTimeout(candidate)
     }
 
@@ -624,7 +612,7 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
         let finish: () -> Void = { [weak self] in
             guard let self = self,
                   self.player?.currentItem === item else { return }
-            if self.shouldPlayWhenReady { self.player?.play() } else { self.player?.pause() }
+            if self.shouldPlayWhenReady && !self.lifecycleIsSuspended { self.player?.play() } else { self.player?.pause() }
             PhimDebugLog.step("NATIVE", "playing-\(candidate.label)", "ok",
                               "title=\(self.request?.logTitle ?? "-") session=\(self.request?.session ?? "-") "
                               + "resume=\(seek == nil ? "new" : "saved") paused=\(!self.shouldPlayWhenReady)")
@@ -889,8 +877,15 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
                               willBeginFullScreenPresentationWithAnimationCoordinator
                               coordinator: UIViewControllerTransitionCoordinator) {
         let wasPlaying = (playerViewController.player?.rate ?? 0) > 0
-        coordinator.animate(alongsideTransition: nil) { context in
-            guard !context.isCancelled, wasPlaying else { return }
+        let item = playerViewController.player?.currentItem
+        let generation = lifecycleGeneration
+        coordinator.animate(alongsideTransition: nil) { [weak self] context in
+            guard let self = self, !context.isCancelled, wasPlaying,
+                  !self.lifecycleIsSuspended,
+                  self.lifecycleGeneration == generation,
+                  UIApplication.shared.applicationState == .active,
+                  self.playerController === playerViewController,
+                  playerViewController.player?.currentItem === item else { return }
             playerViewController.player?.play()
         }
     }
@@ -899,8 +894,15 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
                               willEndFullScreenPresentationWithAnimationCoordinator
                               coordinator: UIViewControllerTransitionCoordinator) {
         let wasPlaying = (playerViewController.player?.rate ?? 0) > 0
-        coordinator.animate(alongsideTransition: nil) { context in
-            guard !context.isCancelled, wasPlaying else { return }
+        let item = playerViewController.player?.currentItem
+        let generation = lifecycleGeneration
+        coordinator.animate(alongsideTransition: nil) { [weak self] context in
+            guard let self = self, !context.isCancelled, wasPlaying,
+                  !self.lifecycleIsSuspended,
+                  self.lifecycleGeneration == generation,
+                  UIApplication.shared.applicationState == .active,
+                  self.playerController === playerViewController,
+                  playerViewController.player?.currentItem === item else { return }
             playerViewController.player?.play()
         }
     }
@@ -917,10 +919,9 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
     private func teardownCurrentItem() {
         timeoutWork?.cancel()
         timeoutWork = nil
-        lifecycleResumeWork?.cancel()
-        lifecycleResumeWork = nil
-        lifecycleResumePosition = nil
-        lifecycleShouldResume = false
+        lifecycleIsSuspended = false
+        lifecycleResumeRate = 0
+        lifecycleGeneration += 1
         pendingInitialSeek = nil
         statusObservation = nil
         removeStallObserver()
