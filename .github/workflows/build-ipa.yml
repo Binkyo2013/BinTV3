@@ -106,7 +106,7 @@ on:
   push:
     # Validate this fix without a release tag or writing to main.
     branches:
-      - "arena/01a0b19f-bintv3"
+      - "arena/01a0b2f0-bintv3"
     tags:
       - "v*"
 
