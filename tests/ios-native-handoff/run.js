@@ -1495,6 +1495,97 @@ function suiteK() {
           && scene.includes("applicationDidBecomeActive()"));
 }
 
+function suiteL() {
+    console.log("\n=== SUITE L (build 247): Giữ Landscape Fullscreen & Paused sau Home ===");
+    const appSwift = fs.readFileSync(path.join(REPO, "BinTV/App/App.swift"), "utf8");
+    const nativePlayerSwift = fs.readFileSync(path.join(REPO, "BinTV/Player/PhimNativePlayerController.swift"), "utf8");
+    const webViewSwift = fs.readFileSync(SWIFT_WEBVIEW, "utf8");
+    const appJs = fs.readFileSync(path.join(ASSETS, "app.js"), "utf8");
+
+    // 1. App.swift: retry landscape orientation loop on foreground transition
+    check("L", "App.swift có requestLandscapeOnForeground với retry loop",
+          appSwift.includes("func requestLandscapeOnForeground(attempt: Int)")
+          && appSwift.includes("DispatchQueue.main.asyncAfter(deadline: .now() + 0.15)"));
+    check("L", "App.swift quan sát binTVScenePhaseDidChange để kích hoạt requestLandscapeOnForeground",
+          appSwift.includes("binTVScenePhaseDidChange") && appSwift.includes("requestLandscapeOnForeground(attempt: 0)"));
+    check("L", "App.swift khoá cứng landscapeLeft và landscapeRight",
+          appSwift.includes("return .landscape")
+          && appSwift.includes("interfaceOrientations: [.landscapeLeft, .landscapeRight]"));
+
+    // 2. PhimNativePlayerController.swift: AVPlayerViewController subclass forcing landscape
+    check("L", "PhimNativePlayerViewController tồn tại và ghi đè supportedInterfaceOrientations",
+          nativePlayerSwift.includes("class PhimNativePlayerViewController: AVPlayerViewController")
+          && nativePlayerSwift.includes("return [.landscapeLeft, .landscapeRight]"));
+    check("L", "presentPlayerIfNeeded sử dụng PhimNativePlayerViewController",
+          nativePlayerSwift.includes("let controller = PhimNativePlayerViewController()"));
+    check("L", "PhimNativePlayerController có enforceLandscapeOrientation và reconcileWebAppState",
+          nativePlayerSwift.includes("enforceLandscapeOrientation()")
+          && nativePlayerSwift.includes("func reconcileWebAppState()"));
+
+    // 3. PhimWebView.swift: fullscreen tracking & restore
+    check("L", "PhimWebView.swift định nghĩa nativePlayerJS có __bintvRestoreFullscreenIfNeeded",
+          webViewSwift.includes("__bintvRestoreFullscreenIfNeeded = function")
+          && webViewSwift.includes("__binTVVideoFullscreen"));
+    check("L", "webkitendfullscreen không reset fullscreen flag khi document.hidden = true",
+          webViewSwift.includes("if (!document.hidden)")
+          && webViewSwift.includes("window.__binTVVideoFullscreen = false;"));
+    check("L", "PhimWebView.swift có restoreLivePlayerStateIfNeeded",
+          webViewSwift.includes("private func restoreLivePlayerStateIfNeeded(probe: String)")
+          && webViewSwift.includes("setPlayerLandscape(true)")
+          && webViewSwift.includes("__bintvRestoreFullscreenIfNeeded"));
+    check("L", "probeLiveWebView gọi restoreLivePlayerStateIfNeeded trên live page",
+          webViewSwift.includes("self.restoreLivePlayerStateIfNeeded(probe: result)"));
+
+    // 4. app.js: capture & restore fullscreen state
+    check("L", "app.js captureMovieLifecycleState lưu player.fullscreen",
+          appJs.includes("fullscreen: !!(window.__binTVVideoFullscreen")
+          && appJs.includes("function isMovieHtmlVideoFullscreen()"));
+    check("L", "app.js movieLifecycleResumeWebPlayer khôi phục fullscreen",
+          appJs.includes("shouldFullscreen && typeof window.__bintvRestoreFullscreenIfNeeded"));
+
+    // 5. DOM simulation: Paused + Fullscreen retain across Home
+    const win = makeWindow("http://127.0.0.1:3000/?android=phone&ios=landscape", true);
+    bootWebApp(win, scriptList(false));
+    const video = win.document.getElementById("bintv-movie-html5-player");
+    check("L", "HTML5 video tồn tại trong test DOM", !!video);
+    let reloadMutations = 0;
+    video.load = function () { reloadMutations++; };
+    video.play = function () { reloadMutations++; return Promise.resolve(); };
+    video.webkitEnterFullscreen = function () {
+        this.webkitDisplayingFullscreen = true;
+        return true;
+    };
+    Object.defineProperty(video, "paused", { configurable: true, value: true });
+    Object.defineProperty(video, "webkitDisplayingFullscreen", { configurable: true, writable: true, value: true });
+    video.currentTime = 345.6;
+
+    win.__binTVVideoFullscreen = true;
+    const captured = win.__bintvPhimLifecycle.capture();
+    check("L", "State snapshot bắt đúng paused=true và fullscreen=true",
+          captured.player.paused === true && captured.player.fullscreen === true && captured.player.positionMs === 345600);
+
+    // Simulate iOS suspending app and closing WebKit fullscreen in background:
+    Object.defineProperty(win.document, "hidden", { configurable: true, value: true });
+    win.document.dispatchEvent(new win.Event("visibilitychange"));
+    // webkitendfullscreen fires in background:
+    video.dispatchEvent(new win.Event("webkitendfullscreen"));
+    check("L", "Cờ __binTVVideoFullscreen KHÔNG bị xoá khi background",
+          win.__binTVVideoFullscreen === true);
+
+    // Foregrounding:
+    Object.defineProperty(win.document, "hidden", { configurable: true, value: false });
+    win.document.dispatchEvent(new win.Event("visibilitychange"));
+    win.dispatchEvent(new win.Event("pageshow"));
+
+    // Call restore helper:
+    const fsRestored = win.__bintvRestoreFullscreenIfNeeded({ paused: true });
+    check("L", "__bintvRestoreFullscreenIfNeeded trả kết quả phục hồi thành công",
+          fsRestored === true);
+    check("L", "Không có reload hoặc tự động play đột ngột khi trở lại app",
+          reloadMutations === 0);
+    win.close();
+}
+
 async function main() {
     suiteA();
     suiteB();
@@ -1506,6 +1597,7 @@ async function main() {
     suiteI();
     suiteJ();
     suiteK();
+    suiteL();
     await suiteD();
     console.log("\n=========================================");
     console.log("PASS: " + pass + "   FAIL: " + fail);

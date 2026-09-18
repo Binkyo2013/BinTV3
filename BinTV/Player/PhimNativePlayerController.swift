@@ -108,6 +108,26 @@ struct NativeSubtitleCue {
     let text: String
 }
 
+#if canImport(UIKit)
+import UIKit
+
+/// Subclass chuyên biệt cho trình phát Phim native: khóa cứng hướng LANDSCAPE
+/// ở cấp độ View Controller (kể cả khi AVPlayerViewController mặc định cho phép portrait).
+final class PhimNativePlayerViewController: AVPlayerViewController {
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        return [.landscapeLeft, .landscapeRight]
+    }
+
+    override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation {
+        return .landscapeRight
+    }
+
+    override var shouldAutorotate: Bool {
+        return true
+    }
+}
+#endif
+
 /// Trình phát GỐC của iOS cho tab PHIM: nhận `streamUrl` từ `PhimWebView`
 /// (WKScriptMessageHandler) rồi mở `AVPlayerViewController` và phát.
 final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate {
@@ -793,13 +813,29 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
     // PRESENT / DISMISS (UIKit — tìm VC trên cùng để present)
     // =================================================================
 
+    private func enforceLandscapeOrientation() {
+        #if canImport(UIKit)
+        if #available(iOS 16.0, *) {
+            let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+            scene?.requestGeometryUpdate(.iOS(interfaceOrientations: [.landscapeLeft, .landscapeRight])) { _ in }
+        } else {
+            UIDevice.current.setValue(UIDeviceOrientation.landscapeLeft.rawValue, forKey: "orientation")
+        }
+        #endif
+    }
+
     private func presentPlayerIfNeeded() {
         if playerController != nil { return }
         guard let host = Self.topViewController() else {
             PhimDebugLog.step("NATIVE", "present", "FAIL", "không tìm được UIViewController để present")
             return
         }
+        #if canImport(UIKit)
+        let controller = PhimNativePlayerViewController()
+        #else
         let controller = AVPlayerViewController()
+        #endif
         controller.player = player
         controller.delegate = self
         controller.videoGravity = .resizeAspect
@@ -811,6 +847,11 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
         // Giữ màn hình sáng khi xem phim (phục hồi trạng thái cũ khi đóng).
         idleTimerWasDisabled = UIApplication.shared.isIdleTimerDisabled
         UIApplication.shared.isIdleTimerDisabled = true
+
+        #if canImport(UIKit)
+        controller.setNeedsUpdateOfSupportedInterfaceOrientations()
+        enforceLandscapeOrientation()
+        #endif
 
         host.present(controller, animated: true) {
             PhimDebugLog.step("NATIVE", "present", "ok",

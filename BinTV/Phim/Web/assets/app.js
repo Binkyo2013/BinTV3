@@ -10733,6 +10733,17 @@
         return position;
     }
 
+    function isMovieHtmlVideoFullscreen() {
+        try {
+            var v = document.getElementById("bintv-movie-html5-player");
+            if (!v) return false;
+            if (v.webkitDisplayingFullscreen) return true;
+            if (v.webkitPresentationMode === "fullscreen") return true;
+            if (document.webkitFullscreenElement === v || document.fullscreenElement === v) return true;
+        } catch (e) {}
+        return false;
+    }
+
     function captureMovieLifecycleState() {
         var selected = movieLifecycleCurrentItem();
         var htmlPaused = false;
@@ -10769,7 +10780,8 @@
                 open: !!moviePlayerOpen,
                 paused: !!(moviePlayerPaused || (!movieNativeHandoffActive && htmlPaused)),
                 positionMs: movieLifecyclePlaybackPosition(),
-                native: !!movieNativeHandoffActive
+                native: !!movieNativeHandoffActive,
+                fullscreen: !!(window.__binTVVideoFullscreen || (movieNativeHandoffActive && moviePlayerOpen) || isMovieHtmlVideoFullscreen())
             },
             source: {
                 url: String(movieCurrentStreamUrl || ""),
@@ -10880,6 +10892,7 @@
             source.subtitleContext || (state.selectedMovie && state.selectedMovie.item) || null);
         var desiredMs = movieLifecycleNumber(playerState.positionMs, 0);
         var shouldPause = !!playerState.paused;
+        var shouldFullscreen = !!playerState.fullscreen;
         var tries = 0;
         function seekWhenReady() {
             var video = document.getElementById("bintv-movie-html5-player");
@@ -10893,6 +10906,9 @@
             if (shouldPause) {
                 try { video.pause(); } catch (pauseError) {}
                 updateMoviePlayerStatus("Tạm dừng");
+            }
+            if (shouldFullscreen && typeof window.__bintvRestoreFullscreenIfNeeded === "function") {
+                try { window.__bintvRestoreFullscreenIfNeeded({ paused: shouldPause }); } catch (fsErr) {}
             }
         }
         setTimeout(seekWhenReady, 0);

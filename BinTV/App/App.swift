@@ -156,6 +156,15 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // (2a) Safety net launch — thường là no-op (scene đã landscape
         //      do Info.plist landscape-only).
         requestLandscapeAtLaunch(attempt: 0)
+        NotificationCenter.default.addObserver(
+            forName: .binTVScenePhaseDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            if (note.userInfo?["phase"] as? String) == "active" {
+                self?.requestLandscapeOnForeground(attempt: 0)
+            }
+        }
         PhimDebugLog.step("LIFECYCLE", "didFinishLaunching", "ok")
         return true
     }
@@ -179,7 +188,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     func applicationDidBecomeActive(_ application: UIApplication) {
         BinTVLifecycleCenter.shared.applicationDidBecomeActive()
-        requestLandscapeIfNotActive()
+        requestLandscapeOnForeground(attempt: 0)
     }
 
     /// Request landscape MỘT lần nếu scene active đang không landscape.
@@ -188,6 +197,29 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     private func requestLandscapeIfNotActive() {
         guard let scene = currentActiveScene(), !scene.interfaceOrientation.isLandscape else { return }
         requestLandscape(on: scene)
+    }
+
+    /// Retry loop khi app quay lại foreground: chờ scene sẵn sàng rồi request
+    /// landscape. Khắc phục triệt để race condition khi applicationDidBecomeActive
+    /// chạy lúc scene.activationState vẫn còn là .foregroundInactive.
+    private func requestLandscapeOnForeground(attempt: Int) {
+        guard attempt < maxLaunchAttempts else { return }
+        let scene = currentActiveScene() ?? UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene }).first
+        guard let targetScene = scene else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                self?.requestLandscapeOnForeground(attempt: attempt + 1)
+            }
+            return
+        }
+        if !targetScene.interfaceOrientation.isLandscape || targetScene.windows.contains(where: { $0.bounds.width < $0.bounds.height }) {
+            requestLandscape(on: targetScene)
+        }
+        if attempt < 2 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.requestLandscapeOnForeground(attempt: attempt + 1)
+            }
+        }
     }
 
     /// Retry loop: chờ scene `foregroundActive` rồi request landscape

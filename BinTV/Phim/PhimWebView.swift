@@ -885,6 +885,37 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
             return (typeof v.webkitEnterFullscreen === "function");
         }
 
+        window.__binTVVideoFullscreen = false;
+
+        window.__bintvIsVideoFullscreen = function () {
+            var v = video();
+            if (!v) return false;
+            try {
+                if (v.webkitDisplayingFullscreen) return true;
+                if (v.webkitPresentationMode === "fullscreen") return true;
+                if (document.webkitFullscreenElement === v || document.fullscreenElement === v) return true;
+            } catch (e) {}
+            return !!window.__binTVVideoFullscreen;
+        };
+
+        window.__bintvRestoreFullscreenIfNeeded = function (options) {
+            var v = video();
+            if (!v) return false;
+            var keepPaused = options && options.paused;
+            if (canGoNativeFullscreen(v)) {
+                try {
+                    if (!v.webkitDisplayingFullscreen) {
+                        v.webkitEnterFullscreen();
+                    }
+                    if (keepPaused) {
+                        try { v.pause(); } catch (e) {}
+                    }
+                    return true;
+                } catch (e2) {}
+            }
+            return false;
+        };
+
         window.__bintvEnterNativeFullscreen = function () {
             var v = video();
             if (!canGoNativeFullscreen(v)) { return false; }
@@ -905,6 +936,36 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
                 // Điều khiển CHUẨN iOS (app.js có chỗ set controls = false).
                 v.controls = true;
             } catch (e) {}
+
+            v.addEventListener("webkitbeginfullscreen", function () {
+                window.__binTVVideoFullscreen = true;
+                try {
+                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.phimLifecycle) {
+                        window.webkit.messageHandlers.phimLifecycle.postMessage({
+                            action: "fullscreenChange",
+                            fullscreen: true
+                        });
+                    }
+                } catch (e) {}
+            }, true);
+
+            v.addEventListener("webkitendfullscreen", function () {
+                // Khi app chuyển background, WebKit tự đóng fullscreen trong lúc document.hidden = true.
+                // Đây là cơ chế suspend của iOS chứ KHÔNG phải người dùng bấm Done.
+                // GIỮ NGUYÊN window.__binTVVideoFullscreen = true để khôi phục khi quay lại foreground!
+                if (!document.hidden) {
+                    window.__binTVVideoFullscreen = false;
+                    try {
+                        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.phimLifecycle) {
+                            window.webkit.messageHandlers.phimLifecycle.postMessage({
+                                action: "fullscreenChange",
+                                fullscreen: false
+                            });
+                        }
+                    } catch (e) {}
+                }
+            }, true);
+
             if (AUTO_FULLSCREEN) {
                 v.addEventListener("playing", function () {
                     if (v.__binTVAutoFsDone || !canGoNativeFullscreen(v)) { return; }
@@ -1235,7 +1296,8 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
                     player: {
                         open: !!(player && player.classList.contains("show")),
                         paused: !!(video && video.paused),
-                        positionMs: video && isFinite(video.currentTime) ? Math.round(video.currentTime * 1000) : 0
+                        positionMs: video && isFinite(video.currentTime) ? Math.round(video.currentTime * 1000) : 0,
+                        fullscreen: !!(window.__binTVVideoFullscreen || (video && (video.webkitDisplayingFullscreen || video.webkitPresentationMode === 'fullscreen')))
                     },
                     source: { url: video ? String(video.currentSrc || video.src || "") : "" }
                 };
@@ -1622,9 +1684,8 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         guard on else { return }
         let orientations: UIInterfaceOrientationMask = [.landscapeLeft, .landscapeRight]
         if #available(iOS 16.0, *) {
-            let scene = UIApplication.shared.connectedScenes
-                .compactMap { $0 as? UIWindowScene }
-                .first { $0.activationState == .foregroundActive }
+            let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
             if let scene = scene {
                 scene.requestGeometryUpdate(.iOS(interfaceOrientations: orientations)) { error in
                     // [BUILD FIX 2026-09-12] Tham số của errorHandler là
@@ -1667,6 +1728,10 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     private var lifecycleObservers: [NSObjectProtocol] = []
     private var savedLifecycleStateJSON: String?
     private var savedLifecycleStateAt: Date?
+    private var isHtmlVideoFullscreen = false
+    private var savedWasFullscreenBeforeBackground = false
+    private var savedWasPausedBeforeBackground = false
+    private var savedWasPlayerOpenBeforeBackground = false
     private var contentProcessTerminated = false
     private var foregroundRestoreNeeded = false
     private var foregroundRestoreScheduled = false
@@ -1745,8 +1810,16 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         foregroundRestoreInProgress = false
         queuedRestoreReason = nil
         foregroundRestoreNeeded = true
+        if nativePlayer.isPresented {
+            savedWasPlayerOpenBeforeBackground = true
+            savedWasFullscreenBeforeBackground = true
+            savedWasPausedBeforeBackground = (nativePlayer.player?.rate ?? 0) <= 0
+        } else {
+            savedWasFullscreenBeforeBackground = isHtmlVideoFullscreen
+        }
         nativePlayer.applicationWillResignActive()
-        PhimDebugLog.step("LIFECYCLE", "PHIM willResignActive", "snapshot")
+        PhimDebugLog.step("LIFECYCLE", "PHIM willResignActive", "snapshot",
+                          "nativeFS=\(nativePlayer.isPresented) htmlFS=\(isHtmlVideoFullscreen)")
         captureLifecycleState(reason: "willResignActive")
     }
 
@@ -1831,6 +1904,10 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
             if let state = dictionary["state"] {
                 saveLifecycleState(state, reason: "web-\(reason)")
             }
+        case "fullscreenChange":
+            let fs = (dictionary["fullscreen"] as? Bool) ?? false
+            isHtmlVideoFullscreen = fs
+            PhimDebugLog.step("LIFECYCLE", "web fullscreenChange", "event", "fullscreen=\(fs)")
         case "pageshow":
             PhimDebugLog.step("LIFECYCLE", "web pageshow", "event")
         default:
@@ -1852,6 +1929,20 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         guard let json = json, !json.isEmpty else { return }
         savedLifecycleStateJSON = json
         savedLifecycleStateAt = Date()
+        if let data = json.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let player = obj["player"] as? [String: Any] {
+            if let fs = player["fullscreen"] as? Bool {
+                if fs { isHtmlVideoFullscreen = true }
+                savedWasFullscreenBeforeBackground = fs
+            }
+            if let paused = player["paused"] as? Bool {
+                savedWasPausedBeforeBackground = paused
+            }
+            if let open = player["open"] as? Bool {
+                savedWasPlayerOpenBeforeBackground = open
+            }
+        }
         PhimDebugLog.step("LIFECYCLE", "snapshot", "saved",
                           "reason=\(reason) \(lifecycleStateSummary(json))")
     }
@@ -2006,6 +2097,7 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
                 // not replay a source or reload merely because it foregrounded.
                 self.foregroundRestoreNeeded = false
                 self.repaintWebView()
+                self.restoreLivePlayerStateIfNeeded(probe: result)
                 self.finishForegroundRepair(expectedEpoch: epoch)
             }
         }
@@ -2029,6 +2121,75 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         PhimDebugLog.step("WEBVIEW", "foregroundProbe", "defer",
                           "reason=\(reason) nativePresented=\(nativePlayer.isPresented) hierarchy=\(webHierarchy())")
         finishForegroundRepair(expectedEpoch: epoch)
+    }
+
+    private func restoreLivePlayerStateIfNeeded(probe: String) {
+        let wasPlayerOpen: Bool
+        let isNative: Bool
+        let wasFullscreen: Bool
+        let wasPaused: Bool
+
+        if let saved = savedLifecycleStateJSON,
+           let savedData = saved.data(using: .utf8),
+           let expected = try? JSONSerialization.jsonObject(with: savedData) as? [String: Any],
+           let player = expected["player"] as? [String: Any] {
+            wasPlayerOpen = (player["open"] as? Bool) ?? savedWasPlayerOpenBeforeBackground
+            isNative = (player["native"] as? Bool) ?? nativePlayer.isPresented
+            wasFullscreen = (player["fullscreen"] as? Bool) ?? isHtmlVideoFullscreen || savedWasFullscreenBeforeBackground
+            wasPaused = (player["paused"] as? Bool) ?? savedWasPausedBeforeBackground
+        } else {
+            wasPlayerOpen = savedWasPlayerOpenBeforeBackground
+            isNative = nativePlayer.isPresented
+            wasFullscreen = isHtmlVideoFullscreen || savedWasFullscreenBeforeBackground
+            wasPaused = savedWasPausedBeforeBackground
+        }
+
+        guard wasPlayerOpen else { return }
+
+        // Bắt buộc giữ hướng LANDSCAPE
+        setPlayerLandscape(true)
+
+        if isNative {
+            nativePlayer.reconcileWebAppState()
+            return
+        }
+
+        // Với trình phát tích hợp HTML5:
+        if wasFullscreen {
+            let pausedLiteral = wasPaused ? "true" : "false"
+            let js = """
+            (function () {
+                try {
+                    if (typeof window.__bintvRestoreFullscreenIfNeeded === 'function') {
+                        return window.__bintvRestoreFullscreenIfNeeded({ paused: \(pausedLiteral) });
+                    }
+                    var v = document.getElementById('bintv-movie-html5-player');
+                    if (v && typeof v.webkitEnterFullscreen === 'function' && !v.webkitDisplayingFullscreen) {
+                        v.webkitEnterFullscreen();
+                        if (\(pausedLiteral)) { try { v.pause(); } catch (e) {} }
+                        return true;
+                    }
+                } catch (e) {}
+                return false;
+            })()
+            """
+            webView.evaluateJavaScript(js) { res, _ in
+                PhimDebugLog.step("WEBVIEW", "restoreLiveFullscreen", "ok",
+                                  "result=\(String(describing: res)) paused=\(wasPaused)")
+            }
+        }
+
+        if wasPaused {
+            let pauseJs = """
+            (function () {
+                try {
+                    var v = document.getElementById('bintv-movie-html5-player');
+                    if (v && !v.paused) { v.pause(); }
+                } catch (e) {}
+            })()
+            """
+            webView.evaluateJavaScript(pauseJs, completionHandler: nil)
+        }
     }
 
     private func safeProbeSummary(_ result: String) -> String {
