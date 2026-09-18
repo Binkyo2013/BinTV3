@@ -151,6 +151,10 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
     /// WebView vừa được tái tạo nhưng player native vẫn sống. Host dùng callback
     /// này để đồng bộ lại lớp UI JS, không phát lại/khởi tạo nguồn thứ hai.
     var onStateReconciled: ((PhimNativePlaybackRequest, TimeInterval, Bool) -> Void)?
+    /// Trạng thái đang tạm dừng của player native.
+    var isPlayerPaused: Bool {
+        return (player?.rate ?? 0) <= 0
+    }
 
     /// Một ứng viên URL (direct hoặc proxy).
     private struct Candidate {
@@ -849,7 +853,9 @@ final class PhimNativePlayerController: NSObject, AVPlayerViewControllerDelegate
         UIApplication.shared.isIdleTimerDisabled = true
 
         #if canImport(UIKit)
-        controller.setNeedsUpdateOfSupportedInterfaceOrientations()
+        if #available(iOS 16.0, *) {
+            controller.setNeedsUpdateOfSupportedInterfaceOrientations()
+        }
         enforceLandscapeOrientation()
         #endif
 

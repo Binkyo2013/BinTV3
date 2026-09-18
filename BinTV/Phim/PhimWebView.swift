@@ -1813,7 +1813,7 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         if nativePlayer.isPresented {
             savedWasPlayerOpenBeforeBackground = true
             savedWasFullscreenBeforeBackground = true
-            savedWasPausedBeforeBackground = (nativePlayer.player?.rate ?? 0) <= 0
+            savedWasPausedBeforeBackground = nativePlayer.isPlayerPaused
         } else {
             savedWasFullscreenBeforeBackground = isHtmlVideoFullscreen
         }
